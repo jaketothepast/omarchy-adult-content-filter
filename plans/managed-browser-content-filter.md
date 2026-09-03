@@ -93,10 +93,10 @@ The model is only a performance and integration proxy, not a production model de
 
 The first policy has two inputs:
 
-- the model's detections and confidence values; and
+- the model's already-thresholded detections; and
 - a deterministic marker belonging only to the controlled flagged fixture.
 
-All images execute the same decode and inference path. The deterministic marker overrides the final fixture verdict so the experiment always exercises both release and replacement behavior. Production page aggregation, age tiers, contextual classification, and parent overrides remain later milestones.
+All images execute the same decode and inference path. The narrow experiment policy replaces detections whose exact class is `BUTTOCKS_EXPOSED`, `FEMALE_BREAST_EXPOSED`, `FEMALE_GENITALIA_EXPOSED`, `ANUS_EXPOSED`, or `MALE_GENITALIA_EXPOSED`; covered and ambiguous classes remain allowed. The exact `http://127.0.0.1` flagged-fixture marker takes precedence with its separate deterministic reason so the harmless experiment always exercises both release and replacement behavior. This explicit class set is plumbing behavior, not a claim about accuracy or a production policy. Production page aggregation, age tiers, contextual classification, and parent overrides remain later milestones.
 
 ### Page cover
 
@@ -106,7 +106,9 @@ The readiness attribute is deliberately only a pipeline-spike mechanism: hostile
 
 ### Metrics
 
-Every run writes newline-delimited JSON to standard output. Records include a run identifier, Chromium version, model checksum, image count and dimensions, response bytes, cache outcome, decode time, preprocessing time, inference time, policy time, pause-to-fulfill time, initial-cover duration, and final verdict. Raw image bytes, URLs beyond the loopback fixture origin, cookies, and page bodies are never logged.
+The headed browser writes privacy-safe per-stage, per-image `MetricRecord` JSONL to stderr. Each record contains exactly `stage`, `verdict`, `fixture_index`, and `elapsed_micros`; it contains no URL, path, response body, image bytes, tensor, cookie, or page body. With `run --json`, one separate headed summary is written to stdout containing Chromium version, intercepted/continued/replaced/unresolved counts, clean-shutdown and reveal results, DOM fixture metadata, and optional no-flash assertion evidence. Without `--json`, stdout contains a short human-readable count summary.
+
+With `bench --json`, stdout contains four JSONL workload summaries. Each includes CPU model, ONNX Runtime version, model checksum, build mode, image count, warmup and iteration counts, median encoded bytes, and p50/p90/p95 objects for decode, preprocessing, inference, postprocessing, and total workload time. Rich run identifiers, cache outcomes, response-byte fields, pause-to-fulfill timing, cover-duration breakdowns, and memory measurements are target telemetry for a later milestone; the current implementation does not produce them.
 
 ## Data flow
 
@@ -157,22 +159,21 @@ Expected commands:
 nix develop                       enter the complete development shell
 nix build                         build the Rust browser-filter binary
 nix flake check                   format, lint, unit, and fixture checks
+nix run .#infer -- IMAGE          run bounded inference for one local image
 nix run .#run                     run the headed local interception demo
 nix run .#bench                   benchmark 1, 13, 19, and 62 images
-nix run .#doctor                  validate browser, model runtime, Docker, KVM, firmware, and sibling repositories
-nix run .#iso-unit                run the ISO repository's VM-free tests
-nix run .#iso-build               call Omarchy ISO's local-source Docker build
-nix run .#iso-test                call its QEMU acceptance harness
-nix run .#iso-integration         call its QEMU integration harness
+nix run .#check                   run the host formatting, lint, and test suite
 ```
 
-`iso-build` validates the sibling checkouts and invokes `../omarchy-iso/bin/omarchy-iso-make --keep-pkg-cache --no-boot-offer --local-source ../omarchy ../omarchy-pkgs`. The privileged build continues inside the existing Arch Linux Docker container and `mkarchiso`; Nix supplies the host tools and the stable command surface. ISO and QEMU work stays out of `nix flake check` because it needs Docker, KVM, network access, mutable caches, and multi-gigabyte artifacts.
+The binary keeps `doctor` only as an explicitly reserved, unimplemented CLI placeholder, and the host flake does not publish a doctor app. The separate ISO workflow milestone owns the real environment doctor and the future ISO unit, build, QEMU acceptance, and integration apps. That work stays out of the current `nix flake check` because it needs Docker, KVM, network access, mutable caches, and multi-gigabyte artifacts.
+
+The future ISO build app will validate the sibling checkouts and invoke `../omarchy-iso/bin/omarchy-iso-make --keep-pkg-cache --no-boot-offer --local-source ../omarchy ../omarchy-pkgs`. The privileged build continues inside the existing Arch Linux Docker container and `mkarchiso`; Nix will supply the host tools and the stable command surface.
 
 The current ISO harness assumes Arch-host OVMF paths and unconditionally manages host packages through `omarchy-pkg-add`. Our sibling ISO fork receives two small, general adaptations instead of duplicating it: `OMARCHY_VM_OVMF_CODE`/`OMARCHY_VM_OVMF_VARS_TEMPLATE` overrides with the current Arch paths as defaults, and `OMARCHY_ISO_MANAGE_HOST_DEPS=0` to skip package installation while still validating every required executable and firmware file. Nix points those overrides at `OVMF.fd` in its store.
 
 The ISO builder's local-source mode currently builds only `omarchy-dev`, `omarchy-settings-dev`, and `omarchy-nvim`, and its sync option knows only the main Omarchy tree. The first ISO command therefore proves the baseline toolchain only. After the host pipeline passes, the ISO and package forks gain a generic local-extra-package input and generic guest artifact sync hook; they do not gain a Kids-specific flag.
 
-The flake lock pins developer inputs. Cargo's lock file pins Rust dependencies. Model downloads use a fixed content hash. The system Chromium used for the first experiment is reported in metrics rather than pinned because compatibility with Omarchy's real browser package is what the experiment needs to test.
+The flake lock pins developer inputs. Cargo's lock file pins Rust dependencies. Model downloads use a fixed content hash. The headed-run summary reports the Chromium version that actually executed; this identity is not part of the per-image `MetricRecord` schema.
 
 ## Test strategy
 
@@ -180,7 +181,7 @@ The flake lock pins developer inputs. Cargo's lock file pins Rust dependencies. 
 
 - preprocessing produces the documented tensor shape, BGR layout, range, right/bottom padding, and alpha/grayscale behavior;
 - model-output decoding maps known synthetic tensors to detections;
-- page policy treats the deterministic fixture marker as blocked and ordinary fixtures as allowed;
+- page policy blocks the five exact exposed-content classes, allows covered/ambiguous/empty reports, and keeps the deterministic fixture override scoped to its exact loopback marker;
 - substituted responses have internally consistent headers;
 - metrics serialize without raw content;
 - size, time, and queue limits fail predictably.
@@ -195,7 +196,7 @@ The flake lock pins developer inputs. Cargo's lock file pins Rust dependencies. 
 - cleanup removes the temporary profile and terminates Chromium;
 - 1, 13, 19, and 62-image pages produce complete timing records;
 - benchmark runs include three warmups and at least 20 measured iterations, reporting p50/p90/p95; and
-- Rust inference matches a checked-in metadata-only golden result produced by the reference Python implementation before speed is compared.
+- colored-pixel preprocessing tests preserve the implemented tensor layout while Python-reference semantic parity remains an unverified future gate; no checked-in reference golden exists today.
 
 ### ISO tests
 
@@ -221,7 +222,7 @@ The benchmark's median ONNX call was 4.528 ms for the 1-image workload. The 62-i
 
 The headed fixture intercepted 17 responses, continued 16, deterministically replaced index 5, left zero pauses unresolved, and shut Chromium down cleanly. Three screenshots taken while the flagged response was held for 501 ms contained only the opaque cover color. The revealed screenshot contained all 16 safe fixture colors and the placeholder, while the original flagged color was absent. Reveal occurred 2 ms after the final required response settled, and the disposable profile was removed before the command emitted its successful summary.
 
-This establishes the response-interception, cover, replacement, and cleanup plumbing only. The deterministic flagged route is not a NudeNet accuracy test, and this result does not validate NudeNet accuracy, real-world pornography blocking, adversarial robustness, model suitability or licensing for distribution, video/canvas/CSS-background/`blob:`/service-worker paths, or ISO integration. The current metrics also do not isolate pause-to-fulfill overhead or measure peak memory, so those portions of the original performance gates remain unresolved.
+This establishes the response-interception, cover, replacement, and cleanup plumbing only. The deterministic flagged route is not a NudeNet accuracy test, and this result does not validate NudeNet accuracy, real-world pornography blocking, adversarial robustness, model suitability or licensing for distribution, video/canvas/CSS-background/`blob:`/service-worker paths, or ISO integration. The current metrics also do not isolate pause-to-fulfill overhead or measure peak memory, so those portions of the original performance gates remain unresolved. The verified model checksum/runtime execution and colored-pixel preprocessing tests do not establish semantic parity with the upstream Python reference; that gate remains explicitly unverified.
 
 ## Security and privacy constraints
 

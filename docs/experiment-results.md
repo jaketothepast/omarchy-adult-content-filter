@@ -4,7 +4,7 @@
 
 On 2026-09-03, all three reproduction commands completed successfully on the machine described below. The controlled headed-browser run intercepted 17 harmless PNG responses, continued 16, replaced the deterministically marked fixture at index 5, revealed only after every response was resolved, shut Chromium down cleanly, and removed its disposable profile.
 
-This result proves the controlled response-interception, cover, and replacement plumbing. It does not validate NudeNet accuracy or real-world pornography blocking. The flagged route is a deterministic policy fixture, not an accuracy test: the model runs for timing, then the fixture marker overrides the final verdict so the replacement branch always executes.
+This result proves the controlled response-interception, cover, and replacement plumbing. It does not validate NudeNet accuracy or real-world pornography blocking. The flagged route is a deterministic policy fixture, not an accuracy test: the model runs for timing, then the fixture marker overrides the final verdict so the replacement branch always executes. No Python-reference golden was produced, so semantic parity with the upstream reference implementation remains unverified.
 
 ## Reproduction commands
 
@@ -16,7 +16,9 @@ nix run .#bench -- --iterations 20 --warmups 3 --json
 nix run .#run -- --images 17 --flagged-index 5 --hold-millis 500 --assert-no-flash --json
 ```
 
-These are the exact commands used for this result. `nix flake check` finished with `all checks passed!`. The benchmark and browser commands emitted newline-delimited JSON; the measurements below are transcribed from that fresh output.
+These are the exact commands used for this result. `nix flake check` finished with `all checks passed!`. `bench --json` emitted four workload-summary JSONL records to stdout. `run --json` emitted one headed-experiment summary JSON object to stdout and two privacy-safe per-image stage records to stderr for each intercepted fixture. Each stderr `MetricRecord` contains exactly `stage`, `verdict`, `fixture_index`, and `elapsed_micros`; it contains no image content or URL. The measurements below are transcribed from that fresh output.
+
+The benchmark records contain `cpu_model`, `onnx_runtime_version`, `model_sha256`, `build_mode`, `image_count`, `warmups`, `iterations`, `encoded_bytes_median`, and p50/p90/p95 objects for decode, preprocessing, inference, postprocessing, and total workload time. The current headed summary contains Chromium/version and lifecycle, reveal, DOM-pixel, and optional no-flash assertion results. Rich run identifiers, cache outcomes, pause-to-fulfill timing, cover-duration breakdowns, and memory measurements remain future telemetry; they are not emitted by this implementation.
 
 ## Environment
 
@@ -137,6 +139,7 @@ These results are machine-specific experiment measurements, not latency guarante
 
 ## What remains unproven
 
+- Semantic parity with the upstream Python reference remains unverified because no checked-in reference golden was established. The verified model hash/runtime execution and colored-pixel preprocessing regressions are real evidence, but they are not a reference-parity gate.
 - NudeNet accuracy, false-positive rate, recall, and threshold calibration were not evaluated. No real-world explicit-content corpus was used.
 - Real-world pornography blocking and adversarial robustness were not tested. A hostile page can use content types, rendering paths, timing, or cover manipulation outside this controlled fixture.
 - The NudeNet model's suitability, training-data provenance, and license for product distribution remain unresolved; upstream metadata conflicts and the weights lack sufficiently clear separate terms.

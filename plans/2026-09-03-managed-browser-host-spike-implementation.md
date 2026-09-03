@@ -4,7 +4,7 @@
 
 **Goal:** Build a reproducible Rust experiment that runs a real ONNX model on image responses paused inside a disposable headed Chromium session, substitutes a deterministic fixture, and reports end-to-end latency.
 
-**Architecture:** A single Rust binary owns an Axum fixture server, one warm ONNX Runtime session, a Chromiumoxide controller, policy decisions, and JSON metrics. A fixture-only Manifest V3 extension hides the page at document start; a root Nix flake pins the compiler, ONNX Runtime, model, Chromium, and test tools.
+**Architecture:** A single Rust binary owns an Axum fixture server, one warm ONNX Runtime session, a Chromiumoxide controller, policy decisions, privacy-safe per-image stderr JSONL, and command summaries. A fixture-only Manifest V3 extension hides the page at document start; a root Nix flake pins the compiler, ONNX Runtime, model, Chromium, and test tools.
 
 **Tech Stack:** Rust 1.97.1, Tokio, Axum, Chromiumoxide 0.9.1, `ort` 2.0.0-rc.13, ONNX Runtime 1.27.1, `image` 0.25.10, Manifest V3, Nix flakes.
 
@@ -19,6 +19,7 @@
 - Log timings and fixture metadata only; never log or persist response bodies or decoded tensors.
 - Bound encoded bytes, decoded dimensions, queue depth, and operation deadlines.
 - Model accuracy, internet browsing, video/canvas/blob handling, production browser policy, and tamper resistance are out of scope.
+- Preserve model-hash/runtime execution evidence and colored-pixel preprocessing regressions without treating them as Python-reference semantic parity; no reference golden is established in this milestone.
 
 ---
 
@@ -37,7 +38,7 @@
 
 **Interfaces:**
 - Produces: binary `omarchy-kids-browser-filter`; library crate `omarchy_kids_browser_filter`.
-- Produces: CLI subcommands `doctor`, `infer`, `bench`, and `run`.
+- Produces: runnable CLI subcommands `infer`, `bench`, and `run`, plus `doctor` as an explicitly reserved placeholder that exits with `doctor is not implemented`.
 - Produces: environment contract `ORT_DYLIB_PATH`, `NUDENET_MODEL_PATH`, `CHROMIUM_BIN`, and `OMARCHY_KIDS_EXTENSION_DIR`.
 
 - [ ] **Step 1: Write the failing CLI smoke test**
@@ -84,11 +85,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ```
 
-Define `Cli` with the four subcommands. Each unimplemented command returns an explicit `anyhow::bail!("<name> is not implemented")`; `--help` succeeds. Create `browser-extension/.gitkeep` so the flake path exists before Task 6 adds the real extension, then generate `Cargo.lock` with `cargo generate-lockfile` after creating the manifests.
+Define `Cli` with the four subcommands. Each initially unimplemented command returns an explicit `anyhow::bail!("<name> is not implemented")`; later host tasks implement `infer`, `bench`, and `run`, while `doctor` remains explicitly reserved for the separate ISO workflow. `--help` succeeds. Create `browser-extension/.gitkeep` so the flake path exists before Task 6 adds the real extension, then generate `Cargo.lock` with `cargo generate-lockfile` after creating the manifests.
 
 - [ ] **Step 4: Add the Nix shell and package**
 
-`flake.nix` must expose `devShells.x86_64-linux.default`, `packages.x86_64-linux.default`, `checks.x86_64-linux.default`, `formatter.x86_64-linux`, and `apps.x86_64-linux.{doctor,infer,bench,run,check}`. Fetch the model from:
+`flake.nix` must expose `devShells.x86_64-linux.default`, `packages.x86_64-linux.default`, `checks.x86_64-linux.default`, `formatter.x86_64-linux`, and `apps.x86_64-linux.{infer,bench,run,check}`. Each app has a valid `meta.description`. Do not publish the reserved `doctor` placeholder as an app until the separate ISO workflow implements the real doctor. Fetch the model from:
 
 ```text
 https://raw.githubusercontent.com/notAI-tech/NudeNet/6ccc81c6c305cccfd46d92b414f8a5c0a816574d/nudenet/320n.onnx
@@ -124,7 +125,7 @@ nix develop -c cargo test --workspace
 nix build
 ```
 
-Expected: every command exits 0; `result/bin/omarchy-kids-browser-filter --help` lists all four commands.
+Expected: every command exits 0; `result/bin/omarchy-kids-browser-filter --help` lists the three runnable host commands plus the explicitly reserved `doctor` placeholder, while `nix flake show` lists only the four implemented apps.
 
 - [ ] **Step 6: Commit**
 
@@ -214,12 +215,12 @@ git commit -m "Add bounded local ONNX image inference"
 **Interfaces:**
 - Produces: `FixtureServer::start(image_count: usize, flagged_index: usize) -> Result<FixtureServer>` and `FixtureServer::url(&self) -> Url`.
 - Produces: routes `/`, `/image/:index.png`, `/redirect.png`, `/corrupt.png`, `/slow/:millis.png`, and `/health`.
-- Produces: `Policy::decide(&self, request_url: &Url, report: &InferenceReport) -> Verdict` where `Verdict` is `Allow` or `Replace { reason: "deterministic-fixture" }`.
-- Produces: `MetricRecord` serialized as one JSON object per line.
+- Produces: `Policy::decide(&self, request_url: &Url, report: &InferenceReport) -> Verdict` where `Verdict` is `Allow`, `Replace { reason: "explicit-detection" }`, or `Replace { reason: "deterministic-fixture" }`.
+- Produces: `MetricRecord` serialized as one JSON object per line with exactly `stage`, `verdict`, `fixture_index`, and `elapsed_micros`.
 
 - [ ] **Step 1: Write failing fixture and policy tests**
 
-Assert the server binds to `127.0.0.1:0`, `/` emits the requested number of image elements, PNGs have distinct deterministic colors, the flagged URL produces `Replace` only after receiving an `InferenceReport`, ordinary URLs produce `Allow`, and serialized metrics contain no URL/path/body/tensor fields.
+Assert the server binds to `127.0.0.1:0`, `/` emits the requested number of image elements, and PNGs have distinct deterministic colors. Assert all five exact exposed-content classes produce `Replace { reason: "explicit-detection" }`, covered/ambiguous/near-match classes and an empty report produce `Allow`, and the exact `http://127.0.0.1` flagged marker takes precedence with `Replace { reason: "deterministic-fixture" }` while similar non-fixture URLs do not. Assert serialized metrics contain only the four approved fields and no URL/path/body/tensor content.
 
 - [ ] **Step 2: Run focused tests and confirm failure**
 
@@ -229,11 +230,11 @@ Expected: FAIL because the three modules do not exist.
 
 - [ ] **Step 3: Implement the fixture server and policy**
 
-Generate all PNGs in memory with the `image` crate. Mark the chosen response with `X-Omarchy-Kids-Fixture: flagged` and keep the same marker in the URL so the Fetch event can identify it without logging. Require a completed inference report before applying the override.
+Generate all PNGs in memory with the `image` crate. Mark the chosen response with `X-Omarchy-Kids-Fixture: flagged` and keep the same marker in the URL so the Fetch event can identify it without logging. Consume the completed report's already-thresholded detections and replace only exact `BUTTOCKS_EXPOSED`, `FEMALE_BREAST_EXPOSED`, `FEMALE_GENITALIA_EXPOSED`, `ANUS_EXPOSED`, or `MALE_GENITALIA_EXPOSED` classes. Apply the exact loopback fixture marker first so its deterministic reason remains stable. Do not broaden this spike policy or claim accuracy.
 
 - [ ] **Step 4: Implement safe metrics**
 
-Use enums for stage and verdict. Provide `MetricSink::write(&MetricRecord)` that writes one line through a generic `Write`; test against a byte vector and deserialize it again.
+Use enums for stage and verdict. Provide `MetricSink::write(&MetricRecord)` that writes one line through a generic `Write`; test against a byte vector, deserialize it again, and assert the exact four-key allowlist. The browser wires this JSONL sink to stderr. Rich run IDs, cache outcomes, pause/cover timing, and memory fields are future targets rather than current output.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -320,7 +321,7 @@ For HTTP 200 image responses, read and decode `GetResponseBodyParams`; execute b
 
 - [ ] **Step 5: Connect the `run` command**
 
-`run --images 17 --flagged-index 5 --json` starts the fixture, runs Chromium, waits for all fixture images, evaluates DOM pixel metadata, emits the summary, calls `browser.close()` and `browser.wait()`, then lets the temporary directory delete the profile.
+`run --images 17 --flagged-index 5 --json` starts the fixture, runs Chromium, waits for all fixture images, evaluates DOM pixel metadata, writes per-image inference/policy `MetricRecord` JSONL to stderr, writes one headed-experiment JSON summary to stdout because `--json` is present, calls `browser.close()` and `browser.wait()`, then lets the temporary directory delete the profile. Without `--json`, stdout receives only the human-readable count summary.
 
 - [ ] **Step 6: Verify the headed smoke test and commit**
 
@@ -410,7 +411,7 @@ Expected: all commands pass before results are documented.
 
 - [ ] **Step 2: Write results without overclaiming**
 
-Record exact machine, Chromium, Rust, ONNX Runtime, model hash, workload sizes, timing percentiles, intercepted/replaced counts, and screenshots assertion result. State explicitly that deterministic replacement proves plumbing only and NudeNet accuracy/licensing remain unresolved.
+Record exact machine, Chromium, Rust, ONNX Runtime, model hash, workload sizes, timing percentiles, intercepted/replaced counts, and screenshots assertion result. State the exact output contracts: benchmark workload JSONL on stdout; headed summary JSON on stdout with `--json`; browser per-image `MetricRecord` JSONL on stderr with only its four allowed fields. State explicitly that deterministic replacement proves plumbing only, NudeNet accuracy/licensing remain unresolved, and Python-reference semantic parity is unverified because no reference golden was established.
 
 - [ ] **Step 3: Verify docs and commit**
 

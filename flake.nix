@@ -52,11 +52,12 @@
           cargo test --workspace
         '';
       };
-      app = command: {
+      app = command: description: {
         type = "app";
         program = "${pkgs.writeShellScript "omarchy-kids-browser-filter-${command}" ''
           exec ${package}/bin/omarchy-kids-browser-filter ${command} "$@"
         ''}";
+        meta = { inherit description; };
       };
     in
     {
@@ -76,13 +77,13 @@
       checks.${system}.default = package;
       formatter.${system} = pkgs.nixfmt;
       apps.${system} = {
-        doctor = app "doctor";
-        infer = app "infer";
-        bench = app "bench";
-        run = app "run";
+        infer = app "infer" "Run bounded local ONNX inference for one image";
+        bench = app "bench" "Benchmark the pinned local ONNX image detector";
+        run = app "run" "Run the controlled headed Chromium interception experiment";
         check = {
           type = "app";
           program = "${check}/bin/omarchy-kids-browser-filter-check";
+          meta.description = "Run formatting, lint, and workspace tests";
         };
       };
     };
