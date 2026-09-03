@@ -49,6 +49,10 @@ enum Command {
         images: usize,
         #[arg(long, default_value_t = 5)]
         flagged_index: usize,
+        #[arg(long, default_value_t = 0)]
+        hold_millis: u64,
+        #[arg(long)]
+        assert_no_flash: bool,
         #[arg(long)]
         json: bool,
     },
@@ -73,19 +77,27 @@ fn main() -> Result<()> {
         Command::Run {
             images,
             flagged_index,
+            hold_millis,
+            assert_no_flash,
             json,
-        } => run(images, flagged_index, json),
+        } => run(images, flagged_index, hold_millis, assert_no_flash, json),
     }
 }
 
-fn run(images: usize, flagged_index: usize, json: bool) -> Result<()> {
+fn run(
+    images: usize,
+    flagged_index: usize,
+    hold_millis: u64,
+    assert_no_flash: bool,
+    json: bool,
+) -> Result<()> {
     let fixture = FixtureServer::start(images, flagged_index)?;
     let profile = tempfile::Builder::new()
         .prefix("omarchy-kids-browser-")
         .tempdir()
         .context("failed to create disposable Chromium profile")?;
     let profile_path = profile.path().to_path_buf();
-    let config = ExperimentConfig::new(
+    let mut config = ExperimentConfig::new(
         fixture.url(),
         PathBuf::from(std::env::var_os("CHROMIUM_BIN").context("CHROMIUM_BIN is not set")?),
         profile_path.clone(),
@@ -97,7 +109,11 @@ fn run(images: usize, flagged_index: usize, json: bool) -> Result<()> {
         Duration::from_secs(5),
         Duration::from_secs(5),
         Duration::from_secs(30),
-    )?;
+    )?
+    .with_expected_flagged_index(flagged_index)?;
+    if assert_no_flash {
+        config = config.with_no_flash_assertion(Duration::from_millis(hold_millis))?;
+    }
     let experiment =
         BrowserExperiment::new(load_detector()?, Policy, MetricSink::new(std::io::stderr()));
     let summary = experiment.run(config)?;
@@ -248,10 +264,10 @@ fn bench_cli_accepts_iteration_warmup_and_json_options() {
     assert!(json);
 }
 
-// Production mutation caught: removing or cross-wiring the bounded fixture options would make the
-// documented headed interception smoke command run a different response mix.
+// Production mutation caught: removing or cross-wiring the fixture and no-flash options would make
+// the documented headed acceptance command run a different response mix or skip its visual proof.
 #[test]
-fn run_cli_accepts_image_flagged_index_and_json_options() {
+fn run_cli_accepts_fixture_hold_no_flash_and_json_options() {
     let cli = Cli::try_parse_from([
         "omarchy-kids-browser-filter",
         "run",
@@ -259,6 +275,9 @@ fn run_cli_accepts_image_flagged_index_and_json_options() {
         "17",
         "--flagged-index",
         "5",
+        "--hold-millis",
+        "500",
+        "--assert-no-flash",
         "--json",
     ])
     .unwrap();
@@ -266,6 +285,8 @@ fn run_cli_accepts_image_flagged_index_and_json_options() {
     let Command::Run {
         images,
         flagged_index,
+        hold_millis,
+        assert_no_flash,
         json,
     } = cli.command
     else {
@@ -273,6 +294,8 @@ fn run_cli_accepts_image_flagged_index_and_json_options() {
     };
     assert_eq!(images, 17);
     assert_eq!(flagged_index, 5);
+    assert_eq!(hold_millis, 500);
+    assert!(assert_no_flash);
     assert!(json);
 }
 

@@ -151,7 +151,30 @@ async fn homepage(State(state): State<FixtureState>) -> Html<String> {
             format!("<img src=\"/image/{index}.png{marker}\">")
         })
         .collect::<String>();
-    Html(format!("<!doctype html><html><body>{images}</body></html>"))
+    Html(format!(
+        r#"<!doctype html>
+<html>
+<head>
+<style>
+html {{ background: #ffffff; }}
+body {{
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: repeat(5, 144px);
+  grid-auto-rows: 144px;
+  gap: 8px;
+  padding: 16px;
+  box-sizing: border-box;
+  align-content: start;
+  background: #ffffff;
+}}
+img {{ width: 144px; height: 144px; image-rendering: pixelated; }}
+</style>
+</head>
+<body>{images}</body>
+</html>"#
+    ))
 }
 
 async fn image(Path(filename): Path<String>, State(state): State<FixtureState>) -> Response {
@@ -343,6 +366,19 @@ mod tests {
         assert!(page.contains("/image/0.png\""));
         assert!(page.contains("/image/1.png?omarchy-kids-fixture=flagged\""));
         assert!(page.contains("/image/2.png\""));
+    }
+
+    // Production mutation caught: returning natural-size 1x1 images would make screenshot color
+    // evidence depend on one device pixel instead of large deterministic fixture regions.
+    #[test]
+    fn homepage_scales_fixture_images_into_deterministic_visible_tiles() {
+        let server = FixtureServer::start(17, 5).unwrap();
+        let response = request(&server, "/");
+        let page = String::from_utf8(response.body).unwrap();
+
+        assert!(page.contains("grid-template-columns: repeat(5, 144px);"));
+        assert!(page.contains("grid-auto-rows: 144px;"));
+        assert!(page.contains("img { width: 144px; height: 144px;"));
     }
 
     // Production mutation caught: returning one shared PNG, changing a fixture's deterministic

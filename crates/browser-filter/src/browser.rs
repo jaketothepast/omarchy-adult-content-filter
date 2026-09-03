@@ -18,6 +18,7 @@ use chromiumoxide::{
             GetResponseBodyParams, HeaderEntry, RequestId, RequestPattern, RequestStage,
         },
         network::ResourceType,
+        page::{CaptureScreenshotFormat, CaptureScreenshotParams, Viewport},
     },
 };
 use futures::StreamExt;
@@ -34,6 +35,8 @@ use crate::{
 
 const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BUFFERED_METRICS: usize = 2 * 100;
+const COVER_RGBA: [u8; 4] = [17, 19, 24, 255];
+const PLACEHOLDER_RGBA: [u8; 4] = [255, 0, 255, 255];
 
 #[derive(Debug)]
 pub struct ExperimentConfig {
@@ -45,6 +48,8 @@ pub struct ExperimentConfig {
     acquisition_timeout: Duration,
     inference_timeout: Duration,
     navigation_timeout: Duration,
+    expected_flagged_index: Option<usize>,
+    no_flash_hold: Option<Duration>,
 }
 
 impl ExperimentConfig {
@@ -103,7 +108,27 @@ impl ExperimentConfig {
             acquisition_timeout,
             inference_timeout,
             navigation_timeout,
+            expected_flagged_index: None,
+            no_flash_hold: None,
         })
+    }
+
+    pub fn with_expected_flagged_index(mut self, flagged_index: usize) -> Result<Self> {
+        anyhow::ensure!(
+            flagged_index < self.image_count,
+            "flagged index must identify a configured image"
+        );
+        self.expected_flagged_index = Some(flagged_index);
+        Ok(self)
+    }
+
+    pub fn with_no_flash_assertion(mut self, hold_duration: Duration) -> Result<Self> {
+        anyhow::ensure!(
+            !hold_duration.is_zero() && hold_duration <= self.navigation_timeout,
+            "no-flash hold must be within 1ns..=navigation timeout"
+        );
+        self.no_flash_hold = Some(hold_duration);
+        Ok(self)
     }
 }
 
@@ -123,7 +148,26 @@ pub struct ExperimentSummary {
     pub replaced: usize,
     pub unresolved: usize,
     pub clean_shutdown: bool,
+    pub reveal_latency_millis: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_flash_assertion: Option<NoFlashAssertionSummary>,
     pub dom_images: Vec<DomImageMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NoFlashAssertionSummary {
+    pub requested_hold_millis: u64,
+    pub actual_hold_millis: u64,
+    pub hold_screenshot_count: usize,
+    pub hold_sampled_pixels: usize,
+    pub reveal_screenshot_count: usize,
+    pub reveal_sampled_pixels: usize,
+    pub cover_rgba: [u8; 4],
+    pub safe_fixture_colors_present: usize,
+    pub placeholder_rgba: [u8; 4],
+    pub placeholder_color_present: bool,
+    pub original_flagged_rgba: [u8; 4],
+    pub original_flagged_color_absent: bool,
 }
 
 pub struct BrowserExperiment<W> {
@@ -502,6 +546,153 @@ struct RunCounts {
     replaced: usize,
 }
 
+struct NoFlashCapture {
+    requested_hold: Duration,
+    actual_hold: Duration,
+    hold_screenshot_count: usize,
+    hold_sampled_pixels: usize,
+    flagged_index: Option<usize>,
+    reveal: Option<RevealScreenshotEvidence>,
+}
+
+impl NoFlashCapture {
+    fn new(requested_hold: Duration) -> Self {
+        Self {
+            requested_hold,
+            actual_hold: Duration::ZERO,
+            hold_screenshot_count: 0,
+            hold_sampled_pixels: 0,
+            flagged_index: None,
+            reveal: None,
+        }
+    }
+
+    async fn hold_flagged_response(
+        &mut self,
+        page: &Page,
+        flagged_index: usize,
+        screenshot_timeout: Duration,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.flagged_index.is_none(),
+            "more than one flagged response entered the no-flash hold"
+        );
+        self.flagged_index = Some(flagged_index);
+        let started = Instant::now();
+        let sample_offsets = [
+            Duration::ZERO,
+            self.requested_hold / 2,
+            self.requested_hold.mul_f64(0.8),
+        ];
+        for offset in sample_offsets {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(started + offset)).await;
+            let screenshot = capture_screenshot(page, screenshot_timeout).await?;
+            let sampled_pixels = assert_cover_screenshot(&screenshot)?;
+            self.hold_sampled_pixels = self
+                .hold_sampled_pixels
+                .checked_add(sampled_pixels)
+                .context("held screenshot pixel count overflowed")?;
+            self.hold_screenshot_count += 1;
+        }
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            started + self.requested_hold,
+        ))
+        .await;
+        self.actual_hold = started.elapsed();
+        anyhow::ensure!(
+            self.hold_screenshot_count >= 3,
+            "no-flash hold captured fewer than three screenshots"
+        );
+        Ok(())
+    }
+
+    async fn capture_reveal(
+        &mut self,
+        page: &Page,
+        image_count: usize,
+        screenshot_timeout: Duration,
+    ) -> Result<()> {
+        let flagged_index = self
+            .flagged_index
+            .context("flagged response was not held before reveal")?;
+        let screenshot = capture_screenshot(page, screenshot_timeout).await?;
+        self.reveal = Some(assert_reveal_screenshot(
+            &screenshot,
+            image_count,
+            flagged_index,
+        )?);
+        Ok(())
+    }
+
+    fn into_summary(self) -> Result<NoFlashAssertionSummary> {
+        let flagged_index = self
+            .flagged_index
+            .context("no-flash assertion did not observe a flagged response")?;
+        let reveal = self
+            .reveal
+            .context("no-flash assertion did not capture the revealed page")?;
+        Ok(NoFlashAssertionSummary {
+            requested_hold_millis: duration_millis(self.requested_hold),
+            actual_hold_millis: duration_millis(self.actual_hold),
+            hold_screenshot_count: self.hold_screenshot_count,
+            hold_sampled_pixels: self.hold_sampled_pixels,
+            reveal_screenshot_count: 1,
+            reveal_sampled_pixels: reveal.sampled_pixels,
+            cover_rgba: COVER_RGBA,
+            safe_fixture_colors_present: reveal.safe_fixture_colors_present,
+            placeholder_rgba: PLACEHOLDER_RGBA,
+            placeholder_color_present: reveal.placeholder_color_present,
+            original_flagged_rgba: fixture_rgba(flagged_index),
+            original_flagged_color_absent: reveal.original_flagged_color_absent,
+        })
+    }
+}
+
+async fn capture_screenshot(page: &Page, deadline: Duration) -> Result<Vec<u8>> {
+    tokio::time::timeout(deadline, async {
+        let region = page
+            .evaluate(
+                "({ width: document.documentElement.clientWidth, height: document.documentElement.clientHeight })",
+            )
+            .await
+            .context("failed to measure screenshot content region")?
+            .into_value::<ScreenshotRegion>()
+            .context("screenshot content region had an unexpected shape")?;
+        anyhow::ensure!(
+            region.width > 0 && region.height > 0,
+            "screenshot content region must be positive"
+        );
+        page.screenshot(
+            CaptureScreenshotParams::builder()
+                .format(CaptureScreenshotFormat::Png)
+                .clip(Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: f64::from(region.width),
+                    height: f64::from(region.height),
+                    scale: 1.0,
+                })
+                .from_surface(true)
+                .capture_beyond_viewport(false)
+                .build(),
+        )
+        .await
+        .context("failed to capture in-memory page screenshot")
+    })
+    .await
+    .context("screenshot acquisition deadline elapsed")?
+}
+
+#[derive(Deserialize)]
+struct ScreenshotRegion {
+    width: u32,
+    height: u32,
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 async fn run_page(
     browser: &Browser,
     worker: &InferenceWorker,
@@ -534,10 +725,15 @@ async fn run_page(
     .context("Fetch.enable deadline elapsed")?
     .context("failed to enable image response interception")?;
 
+    let expected_flagged_index = config
+        .expected_flagged_index
+        .context("expected flagged fixture index is not configured")?;
     let mut navigation = Box::pin(page.goto(config.fixture_url.as_str()));
     let mut navigation_complete = false;
     let mut completed_images = 0;
+    let mut last_response_resolved_at = None;
     let mut counts = RunCounts::default();
+    let mut no_flash = config.no_flash_hold.map(NoFlashCapture::new);
     while completed_images < config.image_count {
         tokio::select! {
             navigation_result = &mut navigation, if !navigation_complete => {
@@ -555,14 +751,44 @@ async fn run_page(
                     config,
                     &ledger,
                     &mut counts,
+                    &mut no_flash,
                 ).await? {
                     completed_images += 1;
+                    if completed_images == config.image_count {
+                        last_response_resolved_at = Some(Instant::now());
+                    }
                 }
             }
         }
     }
     if !navigation_complete {
         navigation.await.context("fixture navigation failed")?;
+    }
+
+    let ready = tokio::time::timeout(
+        config.acquisition_timeout,
+        page.evaluate(
+            r#"(() => {
+                document.documentElement.setAttribute('data-omarchy-kids-ready', '');
+                return document.documentElement.hasAttribute('data-omarchy-kids-ready');
+            })()"#,
+        ),
+    )
+    .await
+    .context("fixture reveal deadline elapsed")?
+    .context("failed to set fixture readiness")?
+    .into_value::<bool>()
+    .context("fixture readiness result had an unexpected shape")?;
+    anyhow::ensure!(ready, "fixture readiness attribute was not set");
+    let reveal_latency_millis = duration_millis(
+        last_response_resolved_at
+            .context("last fixture response resolution time was not recorded")?
+            .elapsed(),
+    );
+    if let Some(assertion) = no_flash.as_mut() {
+        assertion
+            .capture_reveal(&page, config.image_count, config.acquisition_timeout)
+            .await?;
     }
 
     let dom_images = page
@@ -597,6 +823,8 @@ async fn run_page(
             .all(|image| image.natural_width == 1 && image.natural_height == 1),
         "DOM reported an incomplete fixture image"
     );
+    assert_dom_image_colors(&dom_images, expected_flagged_index)?;
+    let no_flash_assertion = no_flash.map(NoFlashCapture::into_summary).transpose()?;
 
     Ok(ExperimentSummary {
         chromium_version,
@@ -608,6 +836,8 @@ async fn run_page(
             .expect("pause ledger mutex poisoned")
             .unresolved_count(),
         clean_shutdown: false,
+        reveal_latency_millis,
+        no_flash_assertion,
         dom_images,
     })
 }
@@ -663,6 +893,7 @@ async fn process_pause(
     config: &ExperimentConfig,
     ledger: &Arc<Mutex<PauseLedger>>,
     counts: &mut RunCounts,
+    no_flash: &mut Option<NoFlashCapture>,
 ) -> Result<bool> {
     ledger
         .lock()
@@ -690,6 +921,20 @@ async fn process_pause(
     };
 
     if prepared.replace {
+        let request_url = Url::parse(&event.request.url).context("paused image URL was invalid")?;
+        let replaced_index = fixture_index(&request_url)?;
+        anyhow::ensure!(
+            Some(replaced_index) == config.expected_flagged_index,
+            "replacement targeted fixture image {replaced_index}, expected {}",
+            config
+                .expected_flagged_index
+                .context("expected flagged fixture index is not configured")?
+        );
+        if let Some(assertion) = no_flash {
+            assertion
+                .hold_flagged_response(page, replaced_index, config.acquisition_timeout)
+                .await?;
+        }
         tokio::time::timeout(
             config.acquisition_timeout,
             page.execute(replacement_response(event.request_id.clone())),
@@ -851,6 +1096,97 @@ fn placeholder_png() -> Vec<u8> {
     bytes.into_inner()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RevealScreenshotEvidence {
+    sampled_pixels: usize,
+    safe_fixture_colors_present: usize,
+    placeholder_color_present: bool,
+    original_flagged_color_absent: bool,
+}
+
+fn assert_cover_screenshot(encoded: &[u8]) -> Result<usize> {
+    let screenshot = image::load_from_memory(encoded)
+        .context("failed to decode held screenshot")?
+        .to_rgba8();
+    for (x, y, pixel) in screenshot.enumerate_pixels() {
+        anyhow::ensure!(
+            pixel.0 == COVER_RGBA,
+            "held screenshot pixel at ({x}, {y}) is {:?}, expected {:?}",
+            pixel.0,
+            COVER_RGBA
+        );
+    }
+    Ok(screenshot.pixels().len())
+}
+
+fn assert_reveal_screenshot(
+    encoded: &[u8],
+    image_count: usize,
+    flagged_index: usize,
+) -> Result<RevealScreenshotEvidence> {
+    let screenshot = image::load_from_memory(encoded)
+        .context("failed to decode revealed screenshot")?
+        .to_rgba8();
+    let pixels = screenshot.pixels().map(|pixel| pixel.0).collect::<Vec<_>>();
+
+    let mut safe_fixture_colors_present = 0;
+    for index in 0..image_count {
+        if index == flagged_index {
+            continue;
+        }
+        let expected = fixture_rgba(index);
+        anyhow::ensure!(
+            pixels.contains(&expected),
+            "revealed screenshot does not contain safe fixture color {expected:?}"
+        );
+        safe_fixture_colors_present += 1;
+    }
+    let placeholder_color_present = pixels.contains(&PLACEHOLDER_RGBA);
+    anyhow::ensure!(
+        placeholder_color_present,
+        "revealed screenshot does not contain placeholder color {PLACEHOLDER_RGBA:?}"
+    );
+    let original_flagged = fixture_rgba(flagged_index);
+    let original_flagged_color_absent = !pixels.contains(&original_flagged);
+    anyhow::ensure!(
+        original_flagged_color_absent,
+        "revealed screenshot contains original flagged color {original_flagged:?}"
+    );
+
+    Ok(RevealScreenshotEvidence {
+        sampled_pixels: pixels.len(),
+        safe_fixture_colors_present,
+        placeholder_color_present,
+        original_flagged_color_absent,
+    })
+}
+
+fn assert_dom_image_colors(images: &[DomImageMetadata], flagged_index: usize) -> Result<()> {
+    for (position, image) in images.iter().enumerate() {
+        anyhow::ensure!(
+            image.index == position,
+            "DOM image position {position} reported index {}",
+            image.index
+        );
+        let expected = if image.index == flagged_index {
+            PLACEHOLDER_RGBA
+        } else {
+            fixture_rgba(image.index)
+        };
+        anyhow::ensure!(
+            image.rgba == expected,
+            "DOM image {} rendered {:?}, expected {expected:?}",
+            image.index,
+            image.rgba
+        );
+    }
+    Ok(())
+}
+
+fn fixture_rgba(index: usize) -> [u8; 4] {
+    [index as u8, (index >> 8) as u8, (index >> 16) as u8, 255]
+}
+
 fn response_requires_body(response_status_code: Option<i64>, has_response_error: bool) -> bool {
     response_status_code == Some(200) && !has_response_error
 }
@@ -923,17 +1259,47 @@ mod tests {
         fetch::{RequestId, RequestStage},
         network::ResourceType,
     };
-    use image::GenericImageView;
+    use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
     use tempfile::tempdir;
     use url::Url;
 
     use super::{
-        CleanupOperations, ExperimentConfig, MAX_OPERATION_TIMEOUT, MetricBuffer, PauseLedger,
+        CleanupOperations, DomImageMetadata, ExperimentConfig, MAX_OPERATION_TIMEOUT, MetricBuffer,
+        PauseLedger, assert_cover_screenshot, assert_dom_image_colors, assert_reveal_screenshot,
         continue_response, decode_response_body, fetch_enable_params, flush_metrics,
         perform_cleanup, replacement_headers, replacement_response, resolve_and_buffer_metrics,
         response_requires_body,
     };
     use crate::metrics::{MetricRecord, MetricSink, MetricStage, MetricVerdict};
+
+    // Production mutation caught: dropping or weakening any declared content-script field would
+    // let Chromium render page children before the supervisor has resolved the initial images.
+    #[test]
+    fn extension_contract_declares_a_permissionless_document_start_cover() {
+        let extension = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../browser-extension");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(extension.join("manifest.json")).unwrap()).unwrap();
+
+        assert_eq!(manifest["manifest_version"], 3);
+        assert!(manifest.get("permissions").is_none());
+        let content_scripts = manifest["content_scripts"].as_array().unwrap();
+        assert_eq!(content_scripts.len(), 1);
+        assert_eq!(
+            content_scripts[0]["matches"],
+            serde_json::json!(["<all_urls>"])
+        );
+        assert_eq!(content_scripts[0]["css"], serde_json::json!(["cover.css"]));
+        assert_eq!(content_scripts[0]["run_at"], "document_start");
+        assert_eq!(content_scripts[0]["all_frames"], true);
+        assert_eq!(content_scripts[0]["match_about_blank"], true);
+        assert!(content_scripts[0].get("js").is_none());
+
+        let css = fs::read_to_string(extension.join("cover.css")).unwrap();
+        assert!(css.contains("html:not([data-omarchy-kids-ready]) {"));
+        assert!(css.contains("background: #111318 !important;"));
+        assert!(css.contains("html:not([data-omarchy-kids-ready]) > * {"));
+        assert!(css.contains("visibility: hidden !important;"));
+    }
 
     fn existing_file(directory: &Path, name: &str) -> std::path::PathBuf {
         let path = directory.join(name);
@@ -948,6 +1314,111 @@ mod tests {
             fixture_index,
             elapsed_micros: 1,
         }
+    }
+
+    fn screenshot_png(width: u32, pixels: Vec<Rgba<u8>>) -> Vec<u8> {
+        let height = u32::try_from(pixels.len()).unwrap() / width;
+        let image = DynamicImage::ImageRgba8(
+            RgbaImage::from_vec(
+                width,
+                height,
+                pixels.into_iter().flat_map(|pixel| pixel.0).collect(),
+            )
+            .unwrap(),
+        );
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut encoded, ImageFormat::Png).unwrap();
+        encoded.into_inner()
+    }
+
+    // Production mutation caught: accepting transparency or any non-cover RGB value would allow a
+    // sampled page pixel to expose content while a response-stage pause remains held.
+    #[test]
+    fn cover_screenshot_assertion_rejects_one_non_cover_pixel() {
+        let covered = screenshot_png(2, vec![Rgba([17, 19, 24, 255]); 4]);
+        assert_eq!(assert_cover_screenshot(&covered).unwrap(), 4);
+
+        let flashed = screenshot_png(
+            2,
+            vec![
+                Rgba([17, 19, 24, 255]),
+                Rgba([17, 19, 24, 255]),
+                Rgba([17, 19, 24, 254]),
+                Rgba([17, 19, 24, 255]),
+            ],
+        );
+        assert_eq!(
+            assert_cover_screenshot(&flashed).unwrap_err().to_string(),
+            "held screenshot pixel at (0, 1) is [17, 19, 24, 254], expected [17, 19, 24, 255]"
+        );
+    }
+
+    // Production mutation caught: checking only image load completion, rather than rendered
+    // screenshot colors, would accept a missing safe tile or leaked original flagged tile.
+    #[test]
+    fn reveal_screenshot_assertion_requires_safe_and_placeholder_colors_without_flagged_color() {
+        let safe_reveal = screenshot_png(
+            3,
+            vec![
+                Rgba([0, 0, 0, 255]),
+                Rgba([255, 0, 255, 255]),
+                Rgba([2, 0, 0, 255]),
+            ],
+        );
+        let evidence = assert_reveal_screenshot(&safe_reveal, 3, 1).unwrap();
+        assert_eq!(evidence.sampled_pixels, 3);
+        assert_eq!(evidence.safe_fixture_colors_present, 2);
+        assert!(evidence.placeholder_color_present);
+        assert!(evidence.original_flagged_color_absent);
+
+        let leaked = screenshot_png(
+            4,
+            vec![
+                Rgba([0, 0, 0, 255]),
+                Rgba([255, 0, 255, 255]),
+                Rgba([2, 0, 0, 255]),
+                Rgba([1, 0, 0, 255]),
+            ],
+        );
+        assert_eq!(
+            assert_reveal_screenshot(&leaked, 3, 1)
+                .unwrap_err()
+                .to_string(),
+            "revealed screenshot contains original flagged color [1, 0, 0, 255]"
+        );
+    }
+
+    // Production mutation caught: merely serializing DOM pixels would let a wrong safe image or
+    // wrong replacement reach the summary without making the headed experiment fail.
+    #[test]
+    fn dom_image_assertion_enforces_every_safe_and_replaced_pixel() {
+        let mut images = vec![
+            DomImageMetadata {
+                index: 0,
+                natural_width: 1,
+                natural_height: 1,
+                rgba: [0, 0, 0, 255],
+            },
+            DomImageMetadata {
+                index: 1,
+                natural_width: 1,
+                natural_height: 1,
+                rgba: [255, 0, 255, 255],
+            },
+            DomImageMetadata {
+                index: 2,
+                natural_width: 1,
+                natural_height: 1,
+                rgba: [2, 0, 0, 255],
+            },
+        ];
+        assert_dom_image_colors(&images, 1).unwrap();
+
+        images[1].rgba = [1, 0, 0, 255];
+        assert_eq!(
+            assert_dom_image_colors(&images, 1).unwrap_err().to_string(),
+            "DOM image 1 rendered [1, 0, 0, 255], expected [255, 0, 255, 255]"
+        );
     }
 
     struct FailingWriter;

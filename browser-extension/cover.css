@@ -1,0 +1,7 @@
+html:not([data-omarchy-kids-ready]) {
+  background: #111318 !important;
+}
+
+html:not([data-omarchy-kids-ready]) > * {
+  visibility: hidden !important;
+}
