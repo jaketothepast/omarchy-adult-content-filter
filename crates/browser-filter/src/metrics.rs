@@ -45,12 +45,14 @@ impl<W: Write> MetricSink<W> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use serde_json::Value;
 
     use super::{MetricRecord, MetricSink, MetricStage, MetricVerdict};
 
-    // Production mutation caught: serializing a URL, filesystem path, response body, or tensor
-    // alongside fixture timing data would persist sensitive content outside the fixture boundary.
+    // Production mutation caught: adding any URL, filesystem path, response body, tensor, or
+    // another unapproved field would expand the persisted privacy surface beyond fixture timings.
     #[test]
     fn writes_one_privacy_safe_json_record_per_line() {
         let record = MetricRecord {
@@ -73,9 +75,20 @@ mod tests {
         assert_eq!(value["verdict"], "replace");
         assert_eq!(value["fixture_index"], 1);
         assert_eq!(value["elapsed_micros"], 42);
-        assert!(value.get("url").is_none());
-        assert!(value.get("path").is_none());
-        assert!(value.get("body").is_none());
-        assert!(value.get("tensor").is_none());
+        let keys = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "elapsed_micros".to_owned(),
+                "fixture_index".to_owned(),
+                "stage".to_owned(),
+                "verdict".to_owned(),
+            ])
+        );
     }
 }

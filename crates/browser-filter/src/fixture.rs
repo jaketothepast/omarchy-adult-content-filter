@@ -39,10 +39,7 @@ impl FixtureServer {
             flagged_index < image_count,
             "flagged_index must identify an image"
         );
-        anyhow::ensure!(
-            image_count <= 16_777_216,
-            "image_count exceeds deterministic RGB colors"
-        );
+        anyhow::ensure!(image_count <= 100, "image_count must be within 1..=100");
 
         let images = (0..image_count).map(make_png).collect::<Result<Vec<_>>>()?;
         let state = FixtureState {
@@ -248,6 +245,15 @@ mod tests {
         body: Vec<u8>,
     }
 
+    impl HttpResponse {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers.lines().find_map(|line| {
+                let (header_name, value) = line.split_once(": ")?;
+                (header_name.eq_ignore_ascii_case(name)).then_some(value)
+            })
+        }
+    }
+
     fn request(server: &FixtureServer, path: &str) -> HttpResponse {
         let address = format!(
             "{}:{}",
@@ -292,15 +298,27 @@ mod tests {
     }
 
     // Production mutation caught: binding to an externally reachable interface, a fixed port, or
-    // not serving the health endpoint would make the loopback request fail or report the wrong URL.
+    // not serving health would either report the wrong origin or prevent two fixture runs from coexisting.
     #[test]
     fn starts_on_an_ephemeral_ipv4_loopback_origin() {
-        let server = FixtureServer::start(2, 1).unwrap();
+        let first = FixtureServer::start(2, 1).unwrap();
+        let second = FixtureServer::start(2, 1).unwrap();
 
-        assert_eq!(server.url().scheme(), "http");
-        assert_eq!(server.url().host_str(), Some("127.0.0.1"));
-        assert_ne!(server.url().port(), Some(0));
-        assert_eq!(request(&server, "/health").status, 200);
+        assert_eq!(first.url().scheme(), "http");
+        assert_eq!(first.url().host_str(), Some("127.0.0.1"));
+        assert_ne!(first.url().port(), Some(0));
+        assert_ne!(first.url().port(), second.url().port());
+        assert_eq!(request(&first, "/health").status, 200);
+        assert_eq!(request(&second, "/health").status, 200);
+    }
+
+    // Production mutation caught: accepting more than the experiment's 100-image maximum would
+    // eagerly generate and retain an unbounded number of encoded fixture PNGs before returning.
+    #[test]
+    fn rejects_one_hundred_and_one_images_before_generating_fixtures() {
+        let error = FixtureServer::start(101, 0).err().unwrap();
+
+        assert_eq!(error.to_string(), "image_count must be within 1..=100");
     }
 
     // Production mutation caught: omitting image elements or failing to put the fixture marker in
@@ -346,14 +364,26 @@ mod tests {
         assert!(flagged.headers.contains("x-omarchy-kids-fixture: flagged"));
     }
 
-    // Production mutation caught: removing one of the non-happy-path fixture routes prevents the
-    // later response interceptor from exercising redirects, corrupt input, or delayed responses.
+    // Production mutation caught: redirecting to an unmarked or wrong image, returning decodable
+    // corrupt content, or skipping the requested delay leaves later interceptor branches untested.
     #[test]
-    fn diagnostic_fixture_routes_are_available() {
+    fn diagnostic_fixture_routes_preserve_their_response_contracts() {
         let server = FixtureServer::start(2, 0).unwrap();
 
-        assert_eq!(request(&server, "/redirect.png").status, 307);
-        assert_eq!(request(&server, "/corrupt.png").status, 200);
-        assert_eq!(request(&server, "/slow/1.png").status, 200);
+        let redirect = request(&server, "/redirect.png");
+        assert_eq!(redirect.status, 307);
+        assert_eq!(
+            redirect.header("location"),
+            Some("/image/0.png?omarchy-kids-fixture=flagged")
+        );
+
+        let corrupt = request(&server, "/corrupt.png");
+        assert_eq!(corrupt.status, 200);
+        assert!(image::load_from_memory(&corrupt.body).is_err());
+
+        let delayed_at = std::time::Instant::now();
+        let slow = request(&server, "/slow/50.png");
+        assert_eq!(slow.status, 200);
+        assert!(delayed_at.elapsed() >= Duration::from_millis(35));
     }
 }
