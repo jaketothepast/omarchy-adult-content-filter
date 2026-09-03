@@ -414,7 +414,7 @@ Record exact machine, Chromium, Rust, ONNX Runtime, model hash, workload sizes, 
 
 - [ ] **Step 3: Verify docs and commit**
 
-Run: `rg -n 'TBD|TODO|FIXME' README.md docs plans`
+Run: `rg -n 'TBD|TODO|FIXME' README.md docs plans/managed-browser-content-filter.md`
 
 Expected: no unresolved placeholders.
 

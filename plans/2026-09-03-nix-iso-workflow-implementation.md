@@ -14,22 +14,23 @@
 
 - Keep `mkarchiso` inside the existing privileged Arch Linux Docker container.
 - Keep ISO/QEMU commands out of `nix flake check` because they require mutable state, network access, Docker, and KVM.
-- Default sibling paths are `../omarchy`, `../omarchy-iso`, and `../omarchy-pkgs`, with environment overrides.
+- Default sibling paths are `omarchy`, `omarchy-iso`, and `omarchy-pkgs` beneath the primary `omarchy-kids` checkout's parent directory, even when commands run from a linked Git worktree; environment overrides win.
 - Always pass `--keep-pkg-cache` and `--no-boot-offer` to unattended local ISO builds.
 - Add only generic host-dependency and firmware overrides to `omarchy-iso`; no Omarchy Kids flag.
 - Do not claim the browser filter is installed in the ISO until a separate package-integration milestone exists.
+- Keep every branch and commit local. Do not create forks, push branches, open pull requests, or otherwise mutate a remote.
 
 ---
 
-### Task 1: Gather writable sibling repositories
+### Task 1: Gather local sibling repositories
 
 **Files:**
 - External checkout: `../omarchy-iso`
 - External checkout: `../omarchy-pkgs`
 
 **Interfaces:**
-- Produces: writable GitHub forks `jaketothepast/omarchy-iso` and `jaketothepast/omarchy-pkgs`.
-- Produces: each local checkout has `origin` set to the fork and `upstream` set to `omacom/<repo>`.
+- Produces: local checkouts of `omacom-io/omarchy-iso` and `omacom-io/omarchy-pkgs` beside the primary `omarchy-kids` checkout.
+- Produces: each checkout retains only its canonical, read-only-for-this-project `origin`; all subsequent feature branches and commits remain local.
 
 - [ ] **Step 1: Prove the sibling paths are absent**
 
@@ -37,15 +38,15 @@ Run: `test ! -e ../omarchy-iso && test ! -e ../omarchy-pkgs`
 
 Expected: exit 0. If either path exists, inspect rather than overwrite it.
 
-- [ ] **Step 2: Fork and clone both repositories**
+- [ ] **Step 2: Clone both canonical repositories without remote mutation**
 
-Use `gh repo fork omacom/omarchy-iso --clone=false` and `gh repo fork omacom/omarchy-pkgs --clone=false`, then clone each fork into its sibling path and add canonical `upstream` remotes.
+Clone `https://github.com/omacom-io/omarchy-iso.git` and `https://github.com/omacom-io/omarchy-pkgs.git` into their sibling paths. Do not use `gh repo fork`, add a writable remote, or push anything.
 
 - [ ] **Step 3: Verify provenance**
 
-Run `git remote -v`, `git status --short --branch`, and `gh repo view --json isFork,parent` in both checkouts.
+Run `git remote -v`, `git status --short --branch`, and `git rev-parse HEAD` in both checkouts.
 
-Expected: clean default branches, writable fork origins, and parents owned by `omacom`.
+Expected: clean default branches and canonical `omacom-io` origins. Record the exact local commit IDs; do not change remote state.
 
 ### Task 2: ISO workflow applications and doctor
 
@@ -65,7 +66,7 @@ Expected: clean default branches, writable fork origins, and parents owned by `o
 
 - [ ] **Step 1: Write failing shell-contract tests**
 
-Create Rust integration tests that execute `scripts/resolve-workspace` against temporary missing and valid directory trees. Assert missing checkouts fail with exact remediation, valid Git worktrees resolve to canonical paths, and environment overrides win over defaults.
+Create Rust integration tests that execute `scripts/resolve-workspace` against temporary missing and valid directory trees. Assert missing checkouts fail with exact remediation, a linked-worktree fixture derives defaults from the primary checkout rather than the nested worktree directory, valid paths resolve canonically, and environment overrides win over defaults.
 
 - [ ] **Step 2: Confirm failure**
 
@@ -121,9 +122,9 @@ git commit -m "Add reproducible Omarchy ISO workflow commands"
 - Produces: `OMARCHY_VM_OVMF_CODE`, default `/usr/share/edk2/x64/OVMF_CODE.4m.fd`.
 - Produces: `OMARCHY_VM_OVMF_VARS_TEMPLATE`, default `/usr/share/edk2/x64/OVMF_VARS.4m.fd`.
 
-- [ ] **Step 1: Write failing contract tests**
+- [ ] **Step 1: Write failing behavioral contract tests**
 
-Add a source-level test that passes temporary firmware paths through both environment variables and asserts every harness entry point uses the overrides rather than a literal Arch path. Assert unset variables retain the two existing Arch defaults.
+Add focused shell tests that execute the shared firmware-resolution boundary with temporary firmware files and stubbed consumers. Exercise each harness entry point through that boundary and assert it receives the two override paths. Assert unset variables retain the two existing Arch defaults. Do not inspect script source text as the test oracle.
 
 - [ ] **Step 2: Confirm failure**
 
@@ -236,4 +237,3 @@ Record exact commits, ISO checksum, durations, and test results in `docs/experim
 git add docs/experiment-results.md
 git commit -m "Record reproducible baseline ISO validation"
 ```
-
