@@ -1,0 +1,359 @@
+use std::{
+    io::Cursor,
+    net::{Ipv4Addr, TcpListener},
+    sync::{Arc, mpsc},
+    thread::{self, JoinHandle},
+};
+
+use anyhow::{Context, Result};
+use axum::{
+    Router,
+    extract::{Path, State},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::get,
+};
+use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+use tokio::{net::TcpListener as TokioTcpListener, runtime::Builder, sync::oneshot};
+use url::Url;
+
+const FIXTURE_MARKER: &str = "omarchy-kids-fixture";
+const FLAGGED_VALUE: &str = "flagged";
+
+#[derive(Clone)]
+struct FixtureState {
+    images: Arc<Vec<Vec<u8>>>,
+    flagged_index: usize,
+}
+
+pub struct FixtureServer {
+    url: Url,
+    shutdown: Option<oneshot::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl FixtureServer {
+    pub fn start(image_count: usize, flagged_index: usize) -> Result<Self> {
+        anyhow::ensure!(image_count > 0, "image_count must be positive");
+        anyhow::ensure!(
+            flagged_index < image_count,
+            "flagged_index must identify an image"
+        );
+        anyhow::ensure!(
+            image_count <= 16_777_216,
+            "image_count exceeds deterministic RGB colors"
+        );
+
+        let images = (0..image_count).map(make_png).collect::<Result<Vec<_>>>()?;
+        let state = FixtureState {
+            images: Arc::new(images),
+            flagged_index,
+        };
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .context("failed to bind fixture server to loopback")?;
+        listener
+            .set_nonblocking(true)
+            .context("failed to configure fixture listener")?;
+        let address = listener
+            .local_addr()
+            .context("failed to read fixture listener address")?;
+        let url =
+            Url::parse(&format!("http://{address}/")).context("failed to construct fixture URL")?;
+        let (shutdown, shutdown_received) = oneshot::channel();
+        let (ready, started) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("omarchy-kids-fixture".to_owned())
+            .spawn(move || run_server(listener, state, shutdown_received, ready))
+            .context("failed to start fixture server thread")?;
+
+        started
+            .recv()
+            .context("fixture server thread stopped before startup")??;
+
+        Ok(Self {
+            url,
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+        })
+    }
+
+    pub fn url(&self) -> Url {
+        self.url.clone()
+    }
+}
+
+impl Drop for FixtureServer {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn run_server(
+    listener: TcpListener,
+    state: FixtureState,
+    shutdown: oneshot::Receiver<()>,
+    ready: mpsc::SyncSender<Result<()>>,
+) {
+    let runtime = match Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = ready.send(Err(error.into()));
+            return;
+        }
+    };
+
+    runtime.block_on(async move {
+        let listener = match TokioTcpListener::from_std(listener) {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = ready.send(Err(error.into()));
+                return;
+            }
+        };
+        let app = router(state);
+        if ready.send(Ok(())).is_err() {
+            return;
+        }
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown.await;
+            })
+            .await;
+    });
+}
+
+fn router(state: FixtureState) -> Router {
+    Router::new()
+        .route("/", get(homepage))
+        .route("/image/{filename}", get(image))
+        .route("/redirect.png", get(redirect))
+        .route("/corrupt.png", get(corrupt))
+        .route("/slow/{filename}", get(slow))
+        .route("/health", get(health))
+        .with_state(state)
+}
+
+async fn homepage(State(state): State<FixtureState>) -> Html<String> {
+    let images = state
+        .images
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let marker = if index == state.flagged_index {
+                format!("?{FIXTURE_MARKER}={FLAGGED_VALUE}")
+            } else {
+                String::new()
+            };
+            format!("<img src=\"/image/{index}.png{marker}\">")
+        })
+        .collect::<String>();
+    Html(format!("<!doctype html><html><body>{images}</body></html>"))
+}
+
+async fn image(Path(filename): Path<String>, State(state): State<FixtureState>) -> Response {
+    match filename
+        .strip_suffix(".png")
+        .and_then(|index| index.parse().ok())
+    {
+        Some(index) => fixture_image_response(&state, index),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn redirect(State(state): State<FixtureState>) -> Redirect {
+    Redirect::temporary(&fixture_image_path(
+        state.flagged_index,
+        state.flagged_index,
+    ))
+}
+
+async fn corrupt() -> Response {
+    png_response(b"corrupt png".to_vec(), false)
+}
+
+async fn slow(Path(filename): Path<String>, State(state): State<FixtureState>) -> Response {
+    match filename
+        .strip_suffix(".png")
+        .and_then(|millis| millis.parse().ok())
+    {
+        Some(millis) => {
+            tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+            fixture_image_response(&state, 0)
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn health() -> StatusCode {
+    StatusCode::OK
+}
+
+fn fixture_image_response(state: &FixtureState, index: usize) -> Response {
+    match state.images.get(index) {
+        Some(image) => png_response(image.clone(), index == state.flagged_index),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn png_response(body: Vec<u8>, flagged: bool) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    if flagged {
+        headers.insert(
+            HeaderName::from_static("x-omarchy-kids-fixture"),
+            HeaderValue::from_static(FLAGGED_VALUE),
+        );
+    }
+    (headers, body).into_response()
+}
+
+fn fixture_image_path(index: usize, flagged_index: usize) -> String {
+    let marker = if index == flagged_index {
+        format!("?{FIXTURE_MARKER}={FLAGGED_VALUE}")
+    } else {
+        String::new()
+    };
+    format!("/image/{index}.png{marker}")
+}
+
+fn make_png(index: usize) -> Result<Vec<u8>> {
+    let color = Rgb([index as u8, (index >> 8) as u8, (index >> 16) as u8]);
+    let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(1, 1, color));
+    let mut bytes = Cursor::new(Vec::new());
+    image.write_to(&mut bytes, ImageFormat::Png)?;
+    Ok(bytes.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        thread,
+        time::Duration,
+    };
+
+    use image::GenericImageView;
+
+    use super::FixtureServer;
+
+    struct HttpResponse {
+        status: u16,
+        headers: String,
+        body: Vec<u8>,
+    }
+
+    fn request(server: &FixtureServer, path: &str) -> HttpResponse {
+        let address = format!(
+            "{}:{}",
+            server.url().host_str().unwrap(),
+            server.url().port().unwrap()
+        );
+        let mut last_error = None;
+        for _ in 0..20 {
+            match TcpStream::connect(&address) {
+                Ok(mut stream) => {
+                    stream
+                        .write_all(
+                            format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                                .as_bytes(),
+                        )
+                        .unwrap();
+                    let mut response = Vec::new();
+                    stream.read_to_end(&mut response).unwrap();
+                    let body_start = response
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .unwrap()
+                        + 4;
+                    let headers = String::from_utf8(response[..body_start].to_vec()).unwrap();
+                    let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+                    return HttpResponse {
+                        status,
+                        headers,
+                        body: response[body_start..].to_vec(),
+                    };
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        panic!(
+            "fixture server did not accept a loopback request: {}",
+            last_error.unwrap()
+        );
+    }
+
+    // Production mutation caught: binding to an externally reachable interface, a fixed port, or
+    // not serving the health endpoint would make the loopback request fail or report the wrong URL.
+    #[test]
+    fn starts_on_an_ephemeral_ipv4_loopback_origin() {
+        let server = FixtureServer::start(2, 1).unwrap();
+
+        assert_eq!(server.url().scheme(), "http");
+        assert_eq!(server.url().host_str(), Some("127.0.0.1"));
+        assert_ne!(server.url().port(), Some(0));
+        assert_eq!(request(&server, "/health").status, 200);
+    }
+
+    // Production mutation caught: omitting image elements or failing to put the fixture marker in
+    // the flagged image URL would prevent the controlled page from exercising every fixture branch.
+    #[test]
+    fn homepage_lists_the_requested_images_and_marks_the_flagged_url() {
+        let server = FixtureServer::start(3, 1).unwrap();
+        let response = request(&server, "/");
+        let page = String::from_utf8(response.body).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(page.matches("<img ").count(), 3);
+        assert!(page.contains("/image/0.png\""));
+        assert!(page.contains("/image/1.png?omarchy-kids-fixture=flagged\""));
+        assert!(page.contains("/image/2.png\""));
+    }
+
+    // Production mutation caught: returning one shared PNG, changing a fixture's deterministic
+    // index-to-color mapping, or dropping the flagged-response header hides response mix-ups.
+    #[test]
+    fn image_routes_return_distinct_deterministic_pngs_and_mark_the_flagged_response() {
+        let server = FixtureServer::start(2, 1).unwrap();
+        let first = request(&server, "/image/0.png");
+        let flagged = request(&server, "/image/1.png?omarchy-kids-fixture=flagged");
+
+        assert_eq!(first.status, 200);
+        assert_eq!(flagged.status, 200);
+        assert_eq!(
+            image::load_from_memory(&first.body)
+                .unwrap()
+                .get_pixel(0, 0)
+                .0,
+            [0, 0, 0, 255]
+        );
+        assert_eq!(
+            image::load_from_memory(&flagged.body)
+                .unwrap()
+                .get_pixel(0, 0)
+                .0,
+            [1, 0, 0, 255]
+        );
+        assert_ne!(first.body, flagged.body);
+        assert!(flagged.headers.contains("x-omarchy-kids-fixture: flagged"));
+    }
+
+    // Production mutation caught: removing one of the non-happy-path fixture routes prevents the
+    // later response interceptor from exercising redirects, corrupt input, or delayed responses.
+    #[test]
+    fn diagnostic_fixture_routes_are_available() {
+        let server = FixtureServer::start(2, 0).unwrap();
+
+        assert_eq!(request(&server, "/redirect.png").status, 307);
+        assert_eq!(request(&server, "/corrupt.png").status, 200);
+        assert_eq!(request(&server, "/slow/1.png").status, 200);
+    }
+}

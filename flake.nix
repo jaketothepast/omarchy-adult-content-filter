@@ -45,6 +45,8 @@
         name = "omarchy-kids-browser-filter-check";
         runtimeInputs = [ pkgs.cargo pkgs.clippy pkgs.rustfmt ];
         text = ''
+          export ORT_DYLIB_PATH=${environment.ORT_DYLIB_PATH}
+          export NUDENET_MODEL_PATH=${environment.NUDENET_MODEL_PATH}
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
