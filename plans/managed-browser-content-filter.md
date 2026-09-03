@@ -213,6 +213,16 @@ On the current development machine and with a warm CPU session:
 
 These are experiment gates, not promises for all Omarchy hardware. The benchmark records enough detail to establish a minimum supported device later.
 
+## Measured host result
+
+The host experiment was rerun on 2026-09-03 with the exact check, release benchmark, and headed-browser commands recorded in [the experiment results](../docs/experiment-results.md). All three commands completed successfully on an AMD Ryzen 5 7600 host with Chromium 152.0.7977.75, Rust 1.97.1, ONNX Runtime 1.27.1, and the verified model SHA-256 `c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f`.
+
+The benchmark's median ONNX call was 4.528 ms for the 1-image workload. The 62-image total workload was 1.073885 seconds p50 and 1.092141 seconds p95. Its generated color formula repeats every 16 images, so this is a throughput workload rather than 62 distinct image patterns.
+
+The headed fixture intercepted 17 responses, continued 16, deterministically replaced index 5, left zero pauses unresolved, and shut Chromium down cleanly. Three screenshots taken while the flagged response was held for 501 ms contained only the opaque cover color. The revealed screenshot contained all 16 safe fixture colors and the placeholder, while the original flagged color was absent. Reveal occurred 2 ms after the final required response settled, and the disposable profile was removed before the command emitted its successful summary.
+
+This establishes the response-interception, cover, replacement, and cleanup plumbing only. The deterministic flagged route is not a NudeNet accuracy test, and this result does not validate NudeNet accuracy, real-world pornography blocking, adversarial robustness, model suitability or licensing for distribution, video/canvas/CSS-background/`blob:`/service-worker paths, or ISO integration. The current metrics also do not isolate pause-to-fulfill overhead or measure peak memory, so those portions of the original performance gates remain unresolved.
+
 ## Security and privacy constraints
 
 - Bind fixture and debugging endpoints to loopback only and use random available ports.
