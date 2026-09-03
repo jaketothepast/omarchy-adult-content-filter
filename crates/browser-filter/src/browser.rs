@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    future::Future,
     io::Cursor,
     net::Ipv4Addr,
     path::PathBuf,
@@ -716,6 +717,23 @@ impl ValidatedRevealLatency {
     }
 }
 
+async fn finish_reveal_after_response<Readiness, ReadinessResult, PostReadiness, PostFuture>(
+    final_response_settled_at: Instant,
+    readiness: Readiness,
+    post_readiness: PostReadiness,
+) -> Result<ValidatedRevealLatency>
+where
+    Readiness: Future<Output = Result<ReadinessResult>>,
+    PostReadiness: FnOnce(ReadinessResult) -> PostFuture,
+    PostFuture: Future<Output = Result<()>>,
+{
+    let readiness_result = readiness.await?;
+    let readiness_applied_at = Instant::now();
+    let latency = ValidatedRevealLatency::between(final_response_settled_at, readiness_applied_at)?;
+    post_readiness(readiness_result).await?;
+    Ok(latency)
+}
+
 async fn run_page(
     browser: &Browser,
     worker: &InferenceWorker,
@@ -789,34 +807,38 @@ async fn run_page(
         navigation.await.context("fixture navigation failed")?;
     }
 
-    let readiness_result = tokio::time::timeout(
-        config.acquisition_timeout,
-        page.evaluate(
-            r#"(() => {
-                document.documentElement.setAttribute('data-omarchy-kids-ready', '');
-                return document.documentElement.hasAttribute('data-omarchy-kids-ready');
-            })()"#,
-        ),
-    )
-    .await
-    .context("fixture reveal deadline elapsed")?
-    .context("failed to set fixture readiness")?;
-    let readiness_applied_at = Instant::now();
-    let ready = readiness_result
-        .into_value::<bool>()
-        .context("fixture readiness result had an unexpected shape")?;
-    anyhow::ensure!(ready, "fixture readiness attribute was not set");
-    let reveal_latency = ValidatedRevealLatency::between(
+    let reveal_latency = finish_reveal_after_response(
         final_response_settled_at
             .context("final fixture response settlement time was not recorded")?,
-        readiness_applied_at,
-    )?;
+        async {
+            tokio::time::timeout(
+                config.acquisition_timeout,
+                page.evaluate(
+                    r#"(() => {
+                        document.documentElement.setAttribute('data-omarchy-kids-ready', '');
+                        return document.documentElement.hasAttribute('data-omarchy-kids-ready');
+                    })()"#,
+                ),
+            )
+            .await
+            .context("fixture reveal deadline elapsed")?
+            .context("failed to set fixture readiness")
+        },
+        |readiness_result| async {
+            let ready = readiness_result
+                .into_value::<bool>()
+                .context("fixture readiness result had an unexpected shape")?;
+            anyhow::ensure!(ready, "fixture readiness attribute was not set");
+            if let Some(assertion) = no_flash.as_mut() {
+                assertion
+                    .capture_reveal(&page, config.image_count, config.acquisition_timeout)
+                    .await?;
+            }
+            Ok(())
+        },
+    )
+    .await?;
     let reveal_latency_millis = reveal_latency.summary_millis();
-    if let Some(assertion) = no_flash.as_mut() {
-        assertion
-            .capture_reveal(&page, config.image_count, config.acquisition_timeout)
-            .await?;
-    }
 
     let dom_images = page
         .evaluate(
@@ -902,13 +924,24 @@ fn resolve_and_buffer_metrics(
     request_id: &RequestId,
     metrics: &mut MetricBuffer,
     records: Vec<MetricRecord>,
-) -> Result<Instant> {
+) -> Result<()> {
     ledger.resolved(request_id)?;
-    metrics.record(records)?;
-    // This is the response-settlement boundary: the CDP continue/fulfill and matching count update
-    // have already succeeded in process_pause, and the synchronous ledger removal plus bounded
-    // metric append have now completed. Caller dispatch and all reveal work happen after this stamp.
-    Ok(Instant::now())
+    metrics.record(records)
+}
+
+fn finish_response_after_cdp(
+    terminal_response: bool,
+    bookkeeping: impl FnOnce() -> Result<()>,
+) -> Result<PauseOutcome> {
+    // This is the response-settlement boundary: the successful CDP continue/fulfill has just
+    // returned. Count mutation, ledger removal, metric buffering, caller dispatch, and reveal work
+    // all happen after this stamp and are therefore charged to response-to-readiness latency.
+    let settled_at = Instant::now();
+    bookkeeping()?;
+    Ok(PauseOutcome {
+        terminal_response,
+        settled_at,
+    })
 }
 
 fn flush_metrics<W: std::io::Write>(metrics: MetricBuffer, sink: &mut MetricSink<W>) -> Result<()> {
@@ -956,7 +989,7 @@ async fn process_pause(
         }
     };
 
-    if prepared.replace {
+    let outcome = if prepared.replace {
         let request_url = Url::parse(&event.request.url).context("paused image URL was invalid")?;
         let replaced_index = fixture_index(&request_url)?;
         anyhow::ensure!(
@@ -978,7 +1011,15 @@ async fn process_pause(
         .await
         .context("Fetch.fulfillRequest deadline elapsed")?
         .context("failed to fulfill flagged image response")?;
-        counts.replaced += 1;
+        finish_response_after_cdp(prepared.terminal_response, || {
+            counts.replaced += 1;
+            resolve_and_buffer_metrics(
+                &mut ledger.lock().expect("pause ledger mutex poisoned"),
+                &event.request_id,
+                metrics,
+                prepared.metrics,
+            )
+        })
     } else {
         tokio::time::timeout(
             config.acquisition_timeout,
@@ -987,22 +1028,21 @@ async fn process_pause(
         .await
         .context("Fetch.continueResponse deadline elapsed")?
         .context("failed to continue image response")?;
-        counts.continued += 1;
-    }
-    let settled_at = resolve_and_buffer_metrics(
-        &mut ledger.lock().expect("pause ledger mutex poisoned"),
-        &event.request_id,
-        metrics,
-        prepared.metrics,
-    )?;
+        finish_response_after_cdp(prepared.terminal_response, || {
+            counts.continued += 1;
+            resolve_and_buffer_metrics(
+                &mut ledger.lock().expect("pause ledger mutex poisoned"),
+                &event.request_id,
+                metrics,
+                prepared.metrics,
+            )
+        })
+    }?;
 
     if let Some(failure) = prepared.failure_after_resolution {
         anyhow::bail!(failure);
     }
-    Ok(PauseOutcome {
-        terminal_response: prepared.terminal_response,
-        settled_at,
-    })
+    Ok(outcome)
 }
 
 async fn prepare_decision(
@@ -1309,8 +1349,9 @@ mod tests {
 
     use super::{
         CleanupOperations, DomImageMetadata, ExperimentConfig, MAX_OPERATION_TIMEOUT, MetricBuffer,
-        PauseLedger, ValidatedRevealLatency, assert_cover_screenshot, assert_dom_image_colors,
-        assert_reveal_screenshot, continue_response, decode_response_body, fetch_enable_params,
+        PauseLedger, RunCounts, ValidatedRevealLatency, assert_cover_screenshot,
+        assert_dom_image_colors, assert_reveal_screenshot, continue_response, decode_response_body,
+        fetch_enable_params, finish_response_after_cdp, finish_reveal_after_response,
         flush_metrics, perform_cleanup, replacement_headers, replacement_response,
         resolve_and_buffer_metrics, response_requires_body,
     };
@@ -1371,13 +1412,18 @@ mod tests {
         assert_eq!(extension_files, ["cover.css", "manifest.json"]);
 
         let css = fs::read_to_string(extension.join("cover.css")).unwrap();
-        let lowercase_css = css.to_ascii_lowercase();
-        assert!(!lowercase_css.contains("@import"));
-        assert!(!lowercase_css.contains("url("));
-        assert!(css.contains("html:not([data-omarchy-kids-ready]) {"));
-        assert!(css.contains("background: #111318 !important;"));
-        assert!(css.contains("html:not([data-omarchy-kids-ready]) > * {"));
-        assert!(css.contains("visibility: hidden !important;"));
+        assert_eq!(
+            css,
+            concat!(
+                "html:not([data-omarchy-kids-ready]) {\n",
+                "  background: #111318 !important;\n",
+                "}\n",
+                "\n",
+                "html:not([data-omarchy-kids-ready]) > * {\n",
+                "  visibility: hidden !important;\n",
+                "}\n",
+            )
+        );
     }
 
     fn existing_file(directory: &Path, name: &str) -> std::path::PathBuf {
@@ -1535,6 +1581,67 @@ mod tests {
             screenshot_decoded_at.duration_since(settled_at),
             Duration::from_millis(9_125)
         );
+    }
+
+    // Production mutations caught: stamping after counter/ledger/metric bookkeeping would omit
+    // that work, while stamping after screenshot validation would include work after readiness.
+    #[tokio::test]
+    async fn production_reveal_timeline_counts_bookkeeping_but_excludes_screenshot_work() {
+        let mut counts = RunCounts::default();
+        let mut buffer = MetricBuffer::default();
+        let mut ledger = PauseLedger::default();
+        let request_id = RequestId::new("integrated-reveal-timeline");
+        ledger.begin(&request_id).unwrap();
+
+        let outcome = finish_response_after_cdp(true, || {
+            std::thread::sleep(Duration::from_millis(80));
+            counts.continued += 1;
+            resolve_and_buffer_metrics(
+                &mut ledger,
+                &request_id,
+                &mut buffer,
+                vec![metric_record(1)],
+            )
+        })
+        .unwrap();
+
+        let latency = finish_reveal_after_response(
+            outcome.settled_at,
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(())
+            },
+            |()| async {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let screenshot = screenshot_png(
+                    3,
+                    vec![
+                        Rgba([0, 0, 0, 255]),
+                        Rgba([255, 0, 255, 255]),
+                        Rgba([2, 0, 0, 255]),
+                    ],
+                );
+                let evidence = assert_reveal_screenshot(&screenshot, 3, 1)?;
+                assert_eq!(evidence.sampled_pixels, 3);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            latency.0 >= Duration::from_millis(90),
+            "bookkeeping was excluded from {:?}",
+            latency.0
+        );
+        assert!(
+            latency.0 < Duration::from_millis(200),
+            "post-readiness screenshot work was included in {:?}",
+            latency.0
+        );
+        assert_eq!(counts.continued, 1);
+        assert_eq!(ledger.unresolved_count(), 0);
+        assert_eq!(buffer.records.len(), 1);
     }
 
     struct FailingWriter;
@@ -1969,31 +2076,6 @@ mod tests {
             "response metrics exceed the 200-record bound"
         );
         assert_eq!(ledger.unresolved_count(), 0);
-    }
-
-    // Production mutation caught: stamping settlement in caller dispatch would include unrelated
-    // post-settlement work rather than the completed ledger and bounded-metric boundary.
-    #[test]
-    fn settlement_helper_returns_its_own_completion_timestamp() {
-        let mut buffer = MetricBuffer::default();
-        let mut ledger = PauseLedger::default();
-        let request_id = RequestId::new("pause-settlement-time");
-        ledger.begin(&request_id).unwrap();
-        let before_settlement = Instant::now();
-
-        let settled_at = resolve_and_buffer_metrics(
-            &mut ledger,
-            &request_id,
-            &mut buffer,
-            vec![metric_record(1)],
-        )
-        .unwrap();
-        let after_return = Instant::now();
-
-        assert!(settled_at >= before_settlement);
-        assert!(settled_at <= after_return);
-        assert_eq!(ledger.unresolved_count(), 0);
-        assert_eq!(buffer.records.len(), 1);
     }
 
     // Production mutation caught: moving arbitrary writer I/O back onto the interception path
