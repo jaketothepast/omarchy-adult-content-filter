@@ -26,6 +26,8 @@
         nativeCheckInputs = [ pkgs.clippy pkgs.rustfmt ];
         checkPhase = ''
           runHook preCheck
+          export ORT_DYLIB_PATH=${environment.ORT_DYLIB_PATH}
+          export NUDENET_MODEL_PATH=${environment.NUDENET_MODEL_PATH}
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace

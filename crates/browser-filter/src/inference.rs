@@ -311,14 +311,14 @@ fn decode_candidates(output: &[f32], original_size: (u32, u32)) -> Result<Vec<Ca
         let center_y = output[OUTPUT_CANDIDATES + candidate];
         let model_width = output[2 * OUTPUT_CANDIDATES + candidate];
         let model_height = output[3 * OUTPUT_CANDIDATES + candidate];
-        let x = ((center_x - model_width / 2.0) * scale).clamp(0.0, original_size.0 as f32);
-        let y = ((center_y - model_height / 2.0) * scale).clamp(0.0, original_size.1 as f32);
-        let width = (model_width * scale).min(original_size.0 as f32 - x);
-        let height = (model_height * scale).min(original_size.1 as f32 - y);
+        let x1 = ((center_x - model_width / 2.0) * scale).clamp(0.0, original_size.0 as f32);
+        let y1 = ((center_y - model_height / 2.0) * scale).clamp(0.0, original_size.1 as f32);
+        let x2 = ((center_x + model_width / 2.0) * scale).clamp(0.0, original_size.0 as f32);
+        let y2 = ((center_y + model_height / 2.0) * scale).clamp(0.0, original_size.1 as f32);
         candidates.push(Candidate {
             class_name: LABELS[class_id],
             score,
-            bounding_box: [x, y, width.max(0.0), height.max(0.0)],
+            bounding_box: [x1, y1, (x2 - x1).max(0.0), (y2 - y1).max(0.0)],
         });
     }
 
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn decodes_thresholded_scaled_clipped_boxes_with_pinned_labels() {
         let mut output = vec![0.0; OUTPUT_CHANNELS * OUTPUT_CANDIDATES];
-        set_candidate(&mut output, 0, [10.0, 20.0, 30.0, 40.0], 0, 0.90);
+        set_candidate(&mut output, 0, [10.0, 10.0, 30.0, 40.0], 0, 0.90);
         set_candidate(&mut output, 1, [300.0, 150.0, 80.0, 80.0], 17, 0.80);
         set_candidate(&mut output, 2, [150.0, 30.0, 10.0, 10.0], 1, 0.19);
         set_candidate(&mut output, 3, [170.0, 30.0, 10.0, 10.0], 1, 0.20);
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(detections.len(), 2);
         assert_eq!(detections[0].class_name, "FEMALE_GENITALIA_COVERED");
         assert!((detections[0].score - 0.90).abs() < 1.0e-6);
-        assert_eq!(detections[0].bounding_box, [0, 0, 60, 80]);
+        assert_eq!(detections[0].bounding_box, [0, 0, 50, 60]);
         assert_eq!(detections[1].class_name, "BUTTOCKS_COVERED");
         assert!((detections[1].score - 0.80).abs() < 1.0e-6);
         assert_eq!(detections[1].bounding_box, [520, 220, 120, 100]);
