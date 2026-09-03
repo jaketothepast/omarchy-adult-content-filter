@@ -1,4 +1,5 @@
 use std::{
+    ffi::CStr,
     fs::File,
     io::{Cursor, Read},
     path::PathBuf,
@@ -98,9 +99,10 @@ pub struct Detector {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DetectorMetadata {
-    pub model_sha256: String,
-    pub runtime_path: PathBuf,
+pub(crate) struct DetectorMetadata {
+    pub(crate) model_sha256: String,
+    pub(crate) runtime_path: PathBuf,
+    pub(crate) runtime_version: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,6 +202,7 @@ impl Detector {
             .canonicalize()
             .context("failed to resolve ONNX Runtime library path")?;
         initialize_runtime(&runtime_path)?;
+        let runtime_version = query_runtime_version(&runtime_path)?;
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::All)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
@@ -215,11 +218,12 @@ impl Detector {
             metadata: DetectorMetadata {
                 model_sha256,
                 runtime_path,
+                runtime_version,
             },
         })
     }
 
-    pub fn metadata(&self) -> &DetectorMetadata {
+    pub(crate) fn metadata(&self) -> &DetectorMetadata {
         &self.metadata
     }
 
@@ -254,6 +258,36 @@ impl Detector {
             postprocess_micros,
         })
     }
+}
+
+fn query_runtime_version(runtime_path: &std::path::Path) -> Result<String> {
+    type ApiBaseGetter = unsafe extern "system" fn() -> *const ort_sys::OrtApiBase;
+
+    // SAFETY: Detector::load has already initialized this exact canonical library through ort.
+    let runtime = unsafe { libloading::Library::new(runtime_path) }
+        .context("failed to reopen initialized ONNX Runtime library")?;
+    // SAFETY: OrtGetApiBase is the stable ONNX Runtime C API entry point with this pinned type.
+    let get_api_base: libloading::Symbol<ApiBaseGetter> = unsafe {
+        runtime
+            .get(b"OrtGetApiBase")
+            .context("initialized ONNX Runtime library does not export OrtGetApiBase")?
+    };
+    // SAFETY: the symbol type matches the pinned ONNX Runtime C API declaration.
+    let api_base = unsafe { get_api_base() };
+    anyhow::ensure!(!api_base.is_null(), "ONNX Runtime returned a null API base");
+    // SAFETY: ONNX Runtime owns this non-null, null-terminated version string for its lifetime.
+    let version = unsafe {
+        let version = ((*api_base).GetVersionString)();
+        anyhow::ensure!(
+            !version.is_null(),
+            "ONNX Runtime returned a null version string"
+        );
+        CStr::from_ptr(version)
+            .to_str()
+            .context("ONNX Runtime version is not UTF-8")?
+    };
+    anyhow::ensure!(!version.is_empty(), "ONNX Runtime version is empty");
+    Ok(version.to_owned())
 }
 
 fn read_verified_model(model_path: &std::path::Path) -> Result<(Vec<u8>, String)> {
@@ -474,6 +508,33 @@ mod tests {
             error.to_string(),
             "model SHA-256 c682bddd11bf3be78651695bb76250f83a99cc787c2fc8ab45219adc2dbbb549 does not match pinned c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f"
         );
+    }
+
+    // Production mutation caught: deriving runtime identity from a selected path's file name
+    // would report this deliberately misleading 9.8.7 label instead of the library's own 1.27.1.
+    #[test]
+    fn detector_metadata_uses_runtime_reported_version_not_library_filename() {
+        let source_runtime = std::env::var_os("ORT_DYLIB_PATH").unwrap();
+        let model_path = std::env::var_os("NUDENET_MODEL_PATH").unwrap().into();
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let misleading_runtime = temporary_directory.path().join("libonnxruntime.so.9.8.7");
+        if fs::hard_link(&source_runtime, &misleading_runtime).is_err() {
+            fs::copy(&source_runtime, &misleading_runtime).unwrap();
+        }
+
+        let detector = Detector::load(ModelConfig {
+            model_path,
+            runtime_path: misleading_runtime.clone(),
+            max_encoded_bytes: DEFAULT_MAX_ENCODED_BYTES,
+            max_pixels: DEFAULT_MAX_PIXELS,
+        })
+        .unwrap();
+
+        assert_eq!(
+            detector.metadata().runtime_path,
+            misleading_runtime.canonicalize().unwrap()
+        );
+        assert_eq!(detector.metadata().runtime_version, "1.27.1");
     }
 
     // Production mutation caught: changing the tensor shape, channel order, anchor, padding,

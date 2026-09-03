@@ -1,4 +1,4 @@
-use std::{path::Path, time::Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use image::{Rgb, RgbImage, codecs::jpeg::JpegEncoder};
@@ -97,7 +97,7 @@ fn run_benchmark_with_engine<E: DetectionEngine>(
 
     Ok(BenchmarkSummary {
         cpu_model,
-        onnx_runtime_version: runtime_version_from_path(&metadata.runtime_path)?,
+        onnx_runtime_version: metadata.runtime_version.clone(),
         model_sha256: metadata.model_sha256.clone(),
         build_mode: if cfg!(debug_assertions) {
             "debug"
@@ -193,18 +193,6 @@ fn cpu_model() -> Result<String> {
         .context("CPU model name is unavailable")
 }
 
-fn runtime_version_from_path(runtime_path: &Path) -> Result<String> {
-    let file_name = runtime_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("ONNX Runtime library path has no UTF-8 file name")?;
-    let version = file_name
-        .strip_prefix("libonnxruntime.so.")
-        .filter(|version| !version.is_empty())
-        .context("ONNX Runtime library file name does not contain a version")?;
-    Ok(version.to_owned())
-}
-
 fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -229,7 +217,7 @@ fn nearest_rank_percentiles(samples: &[u64]) -> [u64; 3] {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, io::Cursor, path::Path};
+    use std::{collections::BTreeSet, io::Cursor};
 
     use image::{ImageFormat, ImageReader};
 
@@ -238,7 +226,6 @@ mod tests {
     use super::{
         BenchmarkConfig, BenchmarkSummary, DetectionEngine, Percentiles, generate_jpegs,
         measure_benchmark, nearest_rank_percentiles, run_benchmark_with_engine,
-        runtime_version_from_path,
     };
 
     struct FakeDetector {
@@ -270,7 +257,8 @@ mod tests {
         FakeDetector {
             metadata: DetectorMetadata {
                 model_sha256: "detector-model-sha".to_owned(),
-                runtime_path: "/nix/store/example/lib/libonnxruntime.so.9.8.7".into(),
+                runtime_path: "/nix/store/example/lib/libonnxruntime.so.misleading".into(),
+                runtime_version: "9.8.7".to_owned(),
             },
             detections: 0,
         }
@@ -332,19 +320,6 @@ mod tests {
             assert_eq!(reader.format(), Some(ImageFormat::Jpeg));
             assert_eq!(reader.into_dimensions().unwrap(), (1280, 720));
         }
-    }
-
-    // Production mutation caught: reporting the crate API level or the whole store path instead
-    // of the selected runtime library version would make benchmark metadata misleading.
-    #[test]
-    fn extracts_exact_onnx_runtime_version_from_nix_library_path() {
-        assert_eq!(
-            runtime_version_from_path(Path::new(
-                "/nix/store/example-onnxruntime-1.27.1/lib/libonnxruntime.so.1.27.1"
-            ))
-            .unwrap(),
-            "1.27.1"
-        );
     }
 
     // Production mutation caught: including warmup reports, collecting one sample per workload,
