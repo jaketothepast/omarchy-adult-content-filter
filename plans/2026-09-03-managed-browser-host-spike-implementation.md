@@ -341,10 +341,11 @@ git commit -m "Intercept and classify Chromium image responses"
 ### Task 6: Document-start cover and no-flash fixture assertions
 
 **Files:**
-- Create: `browser-extension/manifest.json`
+- Modify: `browser-extension/manifest.json`
 - Create: `browser-extension/cover.css`
 - Modify: `crates/browser-filter/src/browser.rs`
 - Modify: `crates/browser-filter/src/fixture.rs`
+- Modify: `crates/browser-filter/src/main.rs`
 
 **Interfaces:**
 - Produces: `html:not([data-omarchy-kids-ready])` cover contract.
