@@ -1,5 +1,6 @@
 use std::{
-    io::Cursor,
+    fs::File,
+    io::{Cursor, Read},
     path::PathBuf,
     sync::OnceLock,
     time::{Duration, Instant},
@@ -12,6 +13,7 @@ use ort::{
     value::TensorRef,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 const MODEL_SIZE: u32 = 320;
 const OUTPUT_CHANNELS: usize = 22;
@@ -22,6 +24,7 @@ const NMS_IOU_THRESHOLD: f32 = 0.45;
 pub const DEFAULT_MAX_ENCODED_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_PIXELS: u64 = 40_000_000;
 pub const MODEL_SHA256: &str = "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f";
+const MAX_MODEL_BYTES: u64 = 64 * 1024 * 1024;
 const LABELS: [&str; 18] = [
     "FEMALE_GENITALIA_COVERED",
     "FACE_FEMALE",
@@ -91,6 +94,13 @@ pub struct ModelConfig {
 pub struct Detector {
     session: Session,
     limits: PreprocessLimits,
+    metadata: DetectorMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetectorMetadata {
+    pub model_sha256: String,
+    pub runtime_path: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -184,11 +194,16 @@ fn preprocess_with_timings(encoded: &[u8], limits: PreprocessLimits) -> Result<T
 
 impl Detector {
     pub fn load(config: ModelConfig) -> Result<Self> {
-        initialize_runtime(&config.runtime_path)?;
+        let (model_bytes, model_sha256) = read_verified_model(&config.model_path)?;
+        let runtime_path = config
+            .runtime_path
+            .canonicalize()
+            .context("failed to resolve ONNX Runtime library path")?;
+        initialize_runtime(&runtime_path)?;
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::All)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
-            .commit_from_file(&config.model_path)
+            .commit_from_memory(&model_bytes)
             .context("failed to load NudeNet model")?;
 
         Ok(Self {
@@ -197,7 +212,15 @@ impl Detector {
                 max_encoded_bytes: config.max_encoded_bytes,
                 max_pixels: config.max_pixels,
             },
+            metadata: DetectorMetadata {
+                model_sha256,
+                runtime_path,
+            },
         })
+    }
+
+    pub fn metadata(&self) -> &DetectorMetadata {
+        &self.metadata
     }
 
     pub fn detect(&mut self, encoded: &[u8]) -> Result<InferenceReport> {
@@ -231,6 +254,43 @@ impl Detector {
             postprocess_micros,
         })
     }
+}
+
+fn read_verified_model(model_path: &std::path::Path) -> Result<(Vec<u8>, String)> {
+    let mut model = File::open(model_path).context("failed to open NudeNet model")?;
+    let model_bytes = model
+        .metadata()
+        .context("failed to inspect NudeNet model")?
+        .len();
+    anyhow::ensure!(
+        model_bytes <= MAX_MODEL_BYTES,
+        "model is {model_bytes} bytes; limit is {MAX_MODEL_BYTES} bytes"
+    );
+
+    let mut hasher = Sha256::new();
+    let mut verified_bytes = Vec::with_capacity(usize::try_from(model_bytes).unwrap_or(0));
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let bytes_read = model
+            .read(&mut buffer)
+            .context("failed to hash NudeNet model")?;
+        if bytes_read == 0 {
+            break;
+        }
+        anyhow::ensure!(
+            verified_bytes.len().saturating_add(bytes_read)
+                <= usize::try_from(MAX_MODEL_BYTES).unwrap_or(usize::MAX),
+            "model grew beyond the {MAX_MODEL_BYTES} byte limit while hashing"
+        );
+        hasher.update(&buffer[..bytes_read]);
+        verified_bytes.extend_from_slice(&buffer[..bytes_read]);
+    }
+    let model_sha256 = format!("{:x}", hasher.finalize());
+    anyhow::ensure!(
+        model_sha256 == MODEL_SHA256,
+        "model SHA-256 {model_sha256} does not match pinned {MODEL_SHA256}"
+    );
+    Ok((verified_bytes, model_sha256))
 }
 
 fn initialize_runtime(runtime_path: &std::path::Path) -> Result<()> {
@@ -343,13 +403,13 @@ fn intersection_over_union(left: &[f32; 4], right: &[f32; 4]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{fs, io::Cursor};
 
     use image::{DynamicImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
 
     use super::{
-        OUTPUT_CANDIDATES, OUTPUT_CHANNELS, PreprocessLimits, decode_candidates, decode_detections,
-        preprocess,
+        DEFAULT_MAX_ENCODED_BYTES, DEFAULT_MAX_PIXELS, Detector, ModelConfig, OUTPUT_CANDIDATES,
+        OUTPUT_CHANNELS, PreprocessLimits, decode_candidates, decode_detections, preprocess,
     };
 
     fn rgb_png() -> Vec<u8> {
@@ -389,6 +449,31 @@ mod tests {
             output[channel * OUTPUT_CANDIDATES + candidate] = value;
         }
         output[(4 + class_id) * OUTPUT_CANDIDATES + candidate] = score;
+    }
+
+    // Production mutation caught: loading the runtime/session before authenticating model bytes
+    // would accept an arbitrary ONNX path and later report the pinned model identity.
+    #[test]
+    fn rejects_model_content_that_does_not_match_pinned_sha256() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let model_path = temporary_directory.path().join("different-model.onnx");
+        fs::write(&model_path, b"not the pinned model").unwrap();
+
+        let error = Detector::load(ModelConfig {
+            model_path,
+            runtime_path: temporary_directory
+                .path()
+                .join("runtime-must-not-be-loaded.so"),
+            max_encoded_bytes: DEFAULT_MAX_ENCODED_BYTES,
+            max_pixels: DEFAULT_MAX_PIXELS,
+        })
+        .err()
+        .unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "model SHA-256 c682bddd11bf3be78651695bb76250f83a99cc787c2fc8ab45219adc2dbbb549 does not match pinned c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f"
+        );
     }
 
     // Production mutation caught: changing the tensor shape, channel order, anchor, padding,
