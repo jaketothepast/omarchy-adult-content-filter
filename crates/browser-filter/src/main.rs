@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use omarchy_kids_browser_filter::benchmark::{BenchmarkConfig, run_benchmark};
 use omarchy_kids_browser_filter::inference::{
     DEFAULT_MAX_ENCODED_BYTES, DEFAULT_MAX_PIXELS, Detector, InferenceReport, MODEL_SHA256,
     ModelConfig,
@@ -25,8 +26,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Doctor,
-    Infer { path: PathBuf },
-    Bench,
+    Infer {
+        path: PathBuf,
+    },
+    Bench {
+        #[arg(long, default_value_t = 20)]
+        iterations: usize,
+        #[arg(long, default_value_t = 3)]
+        warmups: usize,
+        #[arg(long)]
+        json: bool,
+    },
     Run,
 }
 
@@ -41,23 +51,18 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Doctor => anyhow::bail!("doctor is not implemented"),
         Command::Infer { path } => infer(&path),
-        Command::Bench => anyhow::bail!("bench is not implemented"),
+        Command::Bench {
+            iterations,
+            warmups,
+            json,
+        } => bench(iterations, warmups, json),
         Command::Run => anyhow::bail!("run is not implemented"),
     }
 }
 
 fn infer(path: &Path) -> Result<()> {
     let encoded = read_bounded(path, DEFAULT_MAX_ENCODED_BYTES)?;
-    let mut detector = Detector::load(ModelConfig {
-        model_path: PathBuf::from(
-            std::env::var_os("NUDENET_MODEL_PATH").context("NUDENET_MODEL_PATH is not set")?,
-        ),
-        runtime_path: PathBuf::from(
-            std::env::var_os("ORT_DYLIB_PATH").context("ORT_DYLIB_PATH is not set")?,
-        ),
-        max_encoded_bytes: DEFAULT_MAX_ENCODED_BYTES,
-        max_pixels: DEFAULT_MAX_PIXELS,
-    })?;
+    let mut detector = load_detector()?;
     let report = detector.detect(&encoded)?;
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer(
@@ -69,6 +74,43 @@ fn infer(path: &Path) -> Result<()> {
     )?;
     writeln!(stdout)?;
     Ok(())
+}
+
+fn bench(iterations: usize, warmups: usize, json: bool) -> Result<()> {
+    let mut detector = load_detector()?;
+    let mut stdout = std::io::stdout().lock();
+    for mut config in BenchmarkConfig::default_workloads() {
+        config.iterations = iterations;
+        config.warmups = warmups;
+        let summary = run_benchmark(&mut detector, config)?;
+        if json {
+            serde_json::to_writer(&mut stdout, &summary)?;
+            writeln!(stdout)?;
+        } else {
+            writeln!(
+                stdout,
+                "{} images: total workload p50/p90/p95 = {}/{}/{} us",
+                summary.image_count,
+                summary.total_workload_micros.p50,
+                summary.total_workload_micros.p90,
+                summary.total_workload_micros.p95
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn load_detector() -> Result<Detector> {
+    Detector::load(ModelConfig {
+        model_path: PathBuf::from(
+            std::env::var_os("NUDENET_MODEL_PATH").context("NUDENET_MODEL_PATH is not set")?,
+        ),
+        runtime_path: PathBuf::from(
+            std::env::var_os("ORT_DYLIB_PATH").context("ORT_DYLIB_PATH is not set")?,
+        ),
+        max_encoded_bytes: DEFAULT_MAX_ENCODED_BYTES,
+        max_pixels: DEFAULT_MAX_PIXELS,
+    })
 }
 
 fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
@@ -91,4 +133,32 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
 #[test]
 fn cli_definition_is_valid() {
     Cli::command().debug_assert();
+}
+
+// Production mutation caught: removing or renaming a benchmark option, or parsing its numeric
+// value into the wrong field, would make the documented machine-readable command unusable.
+#[test]
+fn bench_cli_accepts_iteration_warmup_and_json_options() {
+    let cli = Cli::try_parse_from([
+        "omarchy-kids-browser-filter",
+        "bench",
+        "--iterations",
+        "7",
+        "--warmups",
+        "2",
+        "--json",
+    ])
+    .unwrap();
+
+    let Command::Bench {
+        iterations,
+        warmups,
+        json,
+    } = cli.command
+    else {
+        panic!("expected bench command");
+    };
+    assert_eq!(iterations, 7);
+    assert_eq!(warmups, 2);
+    assert!(json);
 }
