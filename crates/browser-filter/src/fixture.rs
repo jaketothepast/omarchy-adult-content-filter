@@ -14,7 +14,7 @@ use axum::{
     routing::get,
 };
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
-use tokio::{net::TcpListener as TokioTcpListener, runtime::Builder, sync::oneshot};
+use tokio::{net::TcpListener as TokioTcpListener, runtime::Builder, sync::watch};
 use url::Url;
 
 const FIXTURE_MARKER: &str = "omarchy-kids-fixture";
@@ -24,11 +24,12 @@ const FLAGGED_VALUE: &str = "flagged";
 struct FixtureState {
     images: Arc<Vec<Vec<u8>>>,
     flagged_index: usize,
+    shutdown: watch::Receiver<bool>,
 }
 
 pub struct FixtureServer {
     url: Url,
-    shutdown: Option<oneshot::Sender<()>>,
+    shutdown: Option<watch::Sender<bool>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -42,9 +43,11 @@ impl FixtureServer {
         anyhow::ensure!(image_count <= 100, "image_count must be within 1..=100");
 
         let images = (0..image_count).map(make_png).collect::<Result<Vec<_>>>()?;
+        let (shutdown, shutdown_received) = watch::channel(false);
         let state = FixtureState {
             images: Arc::new(images),
             flagged_index,
+            shutdown: shutdown_received.clone(),
         };
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .context("failed to bind fixture server to loopback")?;
@@ -56,7 +59,6 @@ impl FixtureServer {
             .context("failed to read fixture listener address")?;
         let url =
             Url::parse(&format!("http://{address}/")).context("failed to construct fixture URL")?;
-        let (shutdown, shutdown_received) = oneshot::channel();
         let (ready, started) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("omarchy-kids-fixture".to_owned())
@@ -82,7 +84,7 @@ impl FixtureServer {
 impl Drop for FixtureServer {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+            shutdown.send_replace(true);
         }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -93,7 +95,7 @@ impl Drop for FixtureServer {
 fn run_server(
     listener: TcpListener,
     state: FixtureState,
-    shutdown: oneshot::Receiver<()>,
+    mut shutdown: watch::Receiver<bool>,
     ready: mpsc::SyncSender<Result<()>>,
 ) {
     let runtime = match Builder::new_current_thread().enable_all().build() {
@@ -117,8 +119,8 @@ fn run_server(
             return;
         }
         let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown.await;
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.wait_for(|stopping| *stopping).await;
             })
             .await;
     });
@@ -179,8 +181,15 @@ async fn slow(Path(filename): Path<String>, State(state): State<FixtureState>) -
         .and_then(|millis| millis.parse().ok())
     {
         Some(millis) => {
-            tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
-            fixture_image_response(&state, 0)
+            let mut shutdown = state.shutdown.clone();
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(millis)) => {
+                    fixture_image_response(&state, 0)
+                }
+                _ = shutdown.wait_for(|stopping| *stopping) => {
+                    StatusCode::SERVICE_UNAVAILABLE.into_response()
+                }
+            }
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -385,5 +394,44 @@ mod tests {
         let slow = request(&server, "/slow/50.png");
         assert_eq!(slow.status, 200);
         assert!(delayed_at.elapsed() >= Duration::from_millis(35));
+    }
+
+    // Production mutation caught: leaving a slow handler asleep after shutdown makes the server's
+    // synchronous Drop wait for request-controlled time after a browser deadline cancels a run.
+    #[test]
+    fn shutdown_cancels_an_active_slow_handler_before_joining_the_server_thread() {
+        let server = FixtureServer::start(1, 0).unwrap();
+        let address = format!(
+            "{}:{}",
+            server.url().host_str().unwrap(),
+            server.url().port().unwrap()
+        );
+        let (request_written, request_started) = std::sync::mpsc::sync_channel(1);
+        let client = thread::spawn(move || {
+            let mut stream = TcpStream::connect(&address).unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "GET /slow/500.png HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            request_written.send(()).unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+        });
+        request_started.recv().unwrap();
+        thread::sleep(Duration::from_millis(50));
+
+        let shutdown_started = std::time::Instant::now();
+        drop(server);
+        let shutdown_elapsed = shutdown_started.elapsed();
+        client.join().unwrap();
+
+        assert!(
+            shutdown_elapsed < Duration::from_millis(250),
+            "fixture shutdown waited {shutdown_elapsed:?} for the slow handler"
+        );
     }
 }

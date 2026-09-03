@@ -2,15 +2,22 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use omarchy_kids_browser_filter::benchmark::{BenchmarkConfig, BenchmarkSummary, run_benchmark};
+use omarchy_kids_browser_filter::browser::{
+    BrowserExperiment, ExperimentConfig, ExperimentSummary,
+};
+use omarchy_kids_browser_filter::fixture::FixtureServer;
 use omarchy_kids_browser_filter::inference::{
     DEFAULT_MAX_ENCODED_BYTES, DEFAULT_MAX_PIXELS, Detector, InferenceReport, MODEL_SHA256,
     ModelConfig,
 };
+use omarchy_kids_browser_filter::metrics::MetricSink;
+use omarchy_kids_browser_filter::policy::Policy;
 use serde::Serialize;
 
 #[cfg(test)]
@@ -37,7 +44,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    Run,
+    Run {
+        #[arg(long, default_value_t = 17)]
+        images: usize,
+        #[arg(long, default_value_t = 5)]
+        flagged_index: usize,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -56,8 +70,63 @@ fn main() -> Result<()> {
             warmups,
             json,
         } => bench(iterations, warmups, json),
-        Command::Run => anyhow::bail!("run is not implemented"),
+        Command::Run {
+            images,
+            flagged_index,
+            json,
+        } => run(images, flagged_index, json),
     }
+}
+
+fn run(images: usize, flagged_index: usize, json: bool) -> Result<()> {
+    let fixture = FixtureServer::start(images, flagged_index)?;
+    let profile = tempfile::Builder::new()
+        .prefix("omarchy-kids-browser-")
+        .tempdir()
+        .context("failed to create disposable Chromium profile")?;
+    let profile_path = profile.path().to_path_buf();
+    let config = ExperimentConfig::new(
+        fixture.url(),
+        PathBuf::from(std::env::var_os("CHROMIUM_BIN").context("CHROMIUM_BIN is not set")?),
+        profile_path.clone(),
+        PathBuf::from(
+            std::env::var_os("OMARCHY_KIDS_EXTENSION_DIR")
+                .context("OMARCHY_KIDS_EXTENSION_DIR is not set")?,
+        ),
+        images,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    )?;
+    let experiment =
+        BrowserExperiment::new(load_detector()?, Policy, MetricSink::new(std::io::stderr()));
+    let summary = experiment.run(config)?;
+
+    drop(fixture);
+    drop(profile);
+    anyhow::ensure!(
+        !profile_path.exists(),
+        "disposable Chromium profile was not removed"
+    );
+    write_experiment_output(&mut std::io::stdout().lock(), &summary, json)
+}
+
+fn write_experiment_output<W: Write>(
+    writer: &mut W,
+    summary: &ExperimentSummary,
+    json: bool,
+) -> Result<()> {
+    if json {
+        serde_json::to_writer(&mut *writer, summary)?;
+        writeln!(writer)?;
+    } else {
+        writeln!(
+            writer,
+            "{} intercepted, {} continued, {} replaced, {} unresolved",
+            summary.intercepted, summary.continued, summary.replaced, summary.unresolved
+        )?;
+    }
+    Ok(())
 }
 
 fn infer(path: &Path) -> Result<()> {
@@ -176,6 +245,34 @@ fn bench_cli_accepts_iteration_warmup_and_json_options() {
     };
     assert_eq!(iterations, 7);
     assert_eq!(warmups, 2);
+    assert!(json);
+}
+
+// Production mutation caught: removing or cross-wiring the bounded fixture options would make the
+// documented headed interception smoke command run a different response mix.
+#[test]
+fn run_cli_accepts_image_flagged_index_and_json_options() {
+    let cli = Cli::try_parse_from([
+        "omarchy-kids-browser-filter",
+        "run",
+        "--images",
+        "17",
+        "--flagged-index",
+        "5",
+        "--json",
+    ])
+    .unwrap();
+
+    let Command::Run {
+        images,
+        flagged_index,
+        json,
+    } = cli.command
+    else {
+        panic!("expected run command");
+    };
+    assert_eq!(images, 17);
+    assert_eq!(flagged_index, 5);
     assert!(json);
 }
 
