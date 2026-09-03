@@ -316,7 +316,7 @@ Use `BrowserConfig::builder().chrome_executable(CHROMIUM_BIN).with_head().user_d
 
 - [ ] **Step 4: Resolve every pause exactly once**
 
-For 200 image responses, read and decode `GetResponseBodyParams`; execute bounded inference in `spawn_blocking`; call argument-free `ContinueResponseParams` for allowed content or `FulfillRequestParams` with base64 placeholder PNG for replacement. Continue redirects, 204/304, and response-error events without body reads. Wrap acquisition and inference in timeouts and account for every request id in an unresolved set.
+For HTTP 200 image responses, read and decode `GetResponseBodyParams`; execute bounded inference in `spawn_blocking`; call argument-free `ContinueResponseParams` for allowed content or `FulfillRequestParams` with base64 placeholder PNG for replacement. Continue redirects, 204/304, and response-error events without body reads. Wrap acquisition and inference in timeouts and account for every request id in an unresolved set.
 
 - [ ] **Step 5: Connect the `run` command**
 

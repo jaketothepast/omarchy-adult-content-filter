@@ -49,8 +49,7 @@ omarchy-kids/
 │       └── tests/
 ├── browser-extension/
 │   ├── manifest.json
-│   ├── cover.css
-│   └── cover.js
+│   └── cover.css
 ├── fixtures/
 │   └── browser-filter/
 ├── nix/
@@ -124,7 +123,7 @@ decode → resize → tensor → ONNX inference
         ↓
 model result + deterministic fixture policy
         ↓
-allow: fulfill original body    block: fulfill placeholder body
+allow: continue original response    block: fulfill placeholder body
         ↓
 initial image set complete
         ↓
