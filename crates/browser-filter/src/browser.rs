@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     io::Cursor,
-    net::IpAddr,
+    net::Ipv4Addr,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -33,6 +33,7 @@ use crate::{
 };
 
 const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_BUFFERED_METRICS: usize = 2 * 100;
 
 #[derive(Debug)]
 pub struct ExperimentConfig {
@@ -58,14 +59,10 @@ impl ExperimentConfig {
         inference_timeout: Duration,
         navigation_timeout: Duration,
     ) -> Result<Self> {
-        let loopback = match fixture_url.host() {
-            Some(Host::Ipv4(address)) => IpAddr::V4(address).is_loopback(),
-            Some(Host::Ipv6(address)) => IpAddr::V6(address).is_loopback(),
-            _ => false,
-        };
+        let controlled_origin = matches!(fixture_url.host(), Some(Host::Ipv4(address)) if address == Ipv4Addr::LOCALHOST);
         anyhow::ensure!(
-            fixture_url.scheme() == "http" && loopback,
-            "fixture URL must use an HTTP loopback origin"
+            fixture_url.scheme() == "http" && controlled_origin,
+            "fixture URL must use the controlled http://127.0.0.1 origin"
         );
         anyhow::ensure!(chromium_bin.is_file(), "Chromium executable does not exist");
 
@@ -245,32 +242,51 @@ async fn run_experiment<W: std::io::Write>(
         .build()
         .map_err(anyhow::Error::msg)?;
     let worker = InferenceWorker::start(detector);
+    let mut metric_buffer = MetricBuffer::default();
 
     let launch = Browser::launch(browser_config).await;
     let result = match launch {
         Ok((browser, handler)) => {
-            run_with_browser(browser, handler, &worker, &policy, &mut metrics, &config).await
+            run_with_browser(
+                browser,
+                handler,
+                &worker,
+                &policy,
+                &mut metric_buffer,
+                &config,
+            )
+            .await
         }
         Err(error) => Err(error).context("failed to launch headed Chromium"),
     };
     let worker_result = worker.shutdown(config.inference_timeout).await;
+    let metrics_result = flush_metrics(metric_buffer, &mut metrics);
 
-    match (result, worker_result) {
-        (Ok(summary), Ok(())) => Ok(summary),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(run_error), Err(worker_error)) => Err(anyhow::anyhow!(
-            "{run_error:#}; inference worker cleanup failed: {worker_error:#}"
-        )),
+    let mut summary = None;
+    let mut errors = Vec::new();
+    match result {
+        Ok(value) => summary = Some(value),
+        Err(error) => errors.push(format!("{error:#}")),
+    }
+    if let Err(error) = worker_result {
+        errors.push(format!("inference worker cleanup failed: {error:#}"));
+    }
+    if let Err(error) = metrics_result {
+        errors.push(format!("telemetry flush failed: {error:#}"));
+    }
+    if errors.is_empty() {
+        Ok(summary.expect("a successful browser run returns a summary"))
+    } else {
+        Err(anyhow::anyhow!(errors.join("; ")))
     }
 }
 
-async fn run_with_browser<W: std::io::Write>(
+async fn run_with_browser(
     mut browser: Browser,
     mut handler: chromiumoxide::Handler,
     worker: &InferenceWorker,
     policy: &Policy,
-    metrics: &mut MetricSink<W>,
+    metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
 ) -> Result<ExperimentSummary> {
     let handler_task = tokio::spawn(async move {
@@ -297,8 +313,9 @@ async fn run_with_browser<W: std::io::Write>(
         Err(_) => Err(anyhow::anyhow!("navigation deadline elapsed")),
     };
 
-    let cleanup_result =
-        cleanup_browser(&mut browser, handler_task, config.acquisition_timeout).await;
+    let cleanup_result = cleanup_browser(&mut browser, handler_task, config.acquisition_timeout)
+        .await
+        .into_result();
     let unresolved = ledger
         .lock()
         .expect("pause ledger mutex poisoned")
@@ -330,35 +347,152 @@ async fn cleanup_browser(
     browser: &mut Browser,
     mut handler_task: tokio::task::JoinHandle<Result<()>>,
     deadline: Duration,
-) -> Result<()> {
-    let close_result = tokio::time::timeout(deadline, browser.close()).await;
-    if !matches!(close_result, Ok(Ok(_))) {
-        let kill_result = tokio::time::timeout(deadline, async {
-            match browser.kill().await {
-                Some(result) => result,
-                None => Ok(()),
-            }
-        })
-        .await
-        .context("Chromium kill deadline elapsed")?;
-        kill_result.context("failed to kill Chromium after close failure")?;
+) -> CleanupReport {
+    let mut operations = BrowserCleanupOperations {
+        browser,
+        handler_task: &mut handler_task,
+    };
+    perform_cleanup(&mut operations, deadline).await
+}
+
+trait CleanupOperations {
+    async fn close(&mut self) -> Result<()>;
+    async fn kill(&mut self) -> Result<()>;
+    async fn wait(&mut self) -> Result<()>;
+    async fn join_handler(&mut self) -> Result<()>;
+    fn abort_handler(&mut self);
+    async fn reap_aborted_handler(&mut self) -> Result<()>;
+}
+
+struct BrowserCleanupOperations<'a> {
+    browser: &'a mut Browser,
+    handler_task: &'a mut tokio::task::JoinHandle<Result<()>>,
+}
+
+impl CleanupOperations for BrowserCleanupOperations<'_> {
+    async fn close(&mut self) -> Result<()> {
+        self.browser
+            .close()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from)
     }
 
-    tokio::time::timeout(deadline, browser.wait())
-        .await
-        .context("Chromium wait deadline elapsed")?
-        .context("failed to wait for Chromium")?;
-
-    match tokio::time::timeout(deadline, &mut handler_task).await {
-        Ok(joined) => joined.context("Chromiumoxide handler task failed")??,
-        Err(_) => {
-            handler_task.abort();
-            return Err(anyhow::anyhow!(
-                "Chromiumoxide handler shutdown deadline elapsed"
-            ));
+    async fn kill(&mut self) -> Result<()> {
+        match self.browser.kill().await {
+            Some(result) => result.map_err(anyhow::Error::from),
+            None => Ok(()),
         }
     }
-    Ok(())
+
+    async fn wait(&mut self) -> Result<()> {
+        self.browser
+            .wait()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from)
+    }
+
+    async fn join_handler(&mut self) -> Result<()> {
+        (&mut *self.handler_task)
+            .await
+            .context("Chromiumoxide handler task failed")?
+    }
+
+    fn abort_handler(&mut self) {
+        self.handler_task.abort();
+    }
+
+    async fn reap_aborted_handler(&mut self) -> Result<()> {
+        match (&mut *self.handler_task).await {
+            Ok(result) => result,
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error).context("aborted Chromiumoxide handler task failed"),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CleanupReport {
+    errors: Vec<String>,
+    forced_reap: bool,
+}
+
+impl CleanupReport {
+    fn is_clean(&self) -> bool {
+        self.errors.is_empty() && !self.forced_reap
+    }
+
+    #[cfg(test)]
+    fn forced_reap(&self) -> bool {
+        self.forced_reap
+    }
+
+    fn into_result(self) -> Result<()> {
+        if self.is_clean() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(self.errors.join("; ")))
+        }
+    }
+
+    fn error(&mut self, error: impl Into<String>) {
+        self.errors.push(error.into());
+    }
+}
+
+async fn perform_cleanup<O: CleanupOperations>(
+    operations: &mut O,
+    deadline: Duration,
+) -> CleanupReport {
+    let mut report = CleanupReport::default();
+    match tokio::time::timeout(deadline, operations.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            report.forced_reap = true;
+            report.error(format!("failed to close Chromium gracefully: {error:#}"));
+        }
+        Err(_) => {
+            report.forced_reap = true;
+            report.error("Chromium graceful close deadline elapsed");
+        }
+    }
+
+    if report.forced_reap {
+        match tokio::time::timeout(deadline, operations.kill()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                report.error(format!(
+                    "failed to kill Chromium after close failure: {error:#}"
+                ));
+            }
+            Err(_) => report.error("Chromium kill deadline elapsed"),
+        }
+    }
+
+    match tokio::time::timeout(deadline, operations.wait()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => report.error(format!("failed to wait for Chromium: {error:#}")),
+        Err(_) => report.error("Chromium wait deadline elapsed"),
+    }
+
+    match tokio::time::timeout(deadline, operations.join_handler()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => report.error(format!("Chromiumoxide handler shutdown failed: {error:#}")),
+        Err(_) => {
+            report.error("Chromiumoxide handler shutdown deadline elapsed");
+            operations.abort_handler();
+            match tokio::time::timeout(deadline, operations.reap_aborted_handler()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => report.error(format!(
+                    "failed to reap aborted Chromiumoxide handler: {error:#}"
+                )),
+                Err(_) => report.error("aborted Chromiumoxide handler reap deadline elapsed"),
+            }
+        }
+    }
+
+    report
 }
 
 #[derive(Default)]
@@ -368,11 +502,11 @@ struct RunCounts {
     replaced: usize,
 }
 
-async fn run_page<W: std::io::Write>(
+async fn run_page(
     browser: &Browser,
     worker: &InferenceWorker,
     policy: &Policy,
-    metrics: &mut MetricSink<W>,
+    metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
     ledger: Arc<Mutex<PauseLedger>>,
 ) -> Result<ExperimentSummary> {
@@ -485,13 +619,47 @@ struct PreparedDecision {
     metrics: Vec<MetricRecord>,
 }
 
+#[derive(Default)]
+struct MetricBuffer {
+    records: Vec<MetricRecord>,
+}
+
+impl MetricBuffer {
+    fn record(&mut self, records: Vec<MetricRecord>) -> Result<()> {
+        anyhow::ensure!(
+            self.records.len().saturating_add(records.len()) <= MAX_BUFFERED_METRICS,
+            "response metrics exceed the {MAX_BUFFERED_METRICS}-record bound"
+        );
+        self.records.extend(records);
+        Ok(())
+    }
+}
+
+fn resolve_and_buffer_metrics(
+    ledger: &mut PauseLedger,
+    request_id: &RequestId,
+    metrics: &mut MetricBuffer,
+    records: Vec<MetricRecord>,
+) -> Result<()> {
+    ledger.resolved(request_id)?;
+    metrics.record(records)
+}
+
+fn flush_metrics<W: std::io::Write>(metrics: MetricBuffer, sink: &mut MetricSink<W>) -> Result<()> {
+    for record in &metrics.records {
+        sink.write(record)
+            .context("failed to write buffered privacy-safe response metric")?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn process_pause<W: std::io::Write>(
+async fn process_pause(
     page: &Page,
     event: &EventRequestPaused,
     worker: &InferenceWorker,
     policy: &Policy,
-    metrics: &mut MetricSink<W>,
+    metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
     ledger: &Arc<Mutex<PauseLedger>>,
     counts: &mut RunCounts,
@@ -521,12 +689,6 @@ async fn process_pause<W: std::io::Write>(
         }
     };
 
-    for record in &prepared.metrics {
-        metrics
-            .write(record)
-            .context("failed to write privacy-safe response metric")?;
-    }
-
     if prepared.replace {
         tokio::time::timeout(
             config.acquisition_timeout,
@@ -546,10 +708,12 @@ async fn process_pause<W: std::io::Write>(
         .context("failed to continue image response")?;
         counts.continued += 1;
     }
-    ledger
-        .lock()
-        .expect("pause ledger mutex poisoned")
-        .resolved(&event.request_id)?;
+    resolve_and_buffer_metrics(
+        &mut ledger.lock().expect("pause ledger mutex poisoned"),
+        &event.request_id,
+        metrics,
+        prepared.metrics,
+    )?;
 
     if let Some(failure) = prepared.failure_after_resolution {
         anyhow::bail!(failure);
@@ -721,16 +885,18 @@ fn decode_response_body(body: &str, base64_encoded: bool, max_bytes: usize) -> R
 
 #[derive(Default)]
 struct PauseLedger {
+    seen: HashSet<RequestId>,
     unresolved: HashSet<RequestId>,
 }
 
 impl PauseLedger {
     fn begin(&mut self, request_id: &RequestId) -> Result<()> {
         anyhow::ensure!(
-            self.unresolved.insert(request_id.clone()),
+            self.seen.insert(request_id.clone()),
             "request {} was observed more than once",
             request_id.as_ref()
         );
+        self.unresolved.insert(request_id.clone());
         Ok(())
     }
 
@@ -750,7 +916,7 @@ impl PauseLedger {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, time::Duration};
+    use std::{fs, io::Write, path::Path, time::Duration};
 
     use base64::{Engine as _, prelude::BASE64_STANDARD};
     use chromiumoxide::cdp::browser_protocol::{
@@ -762,15 +928,111 @@ mod tests {
     use url::Url;
 
     use super::{
-        ExperimentConfig, MAX_OPERATION_TIMEOUT, PauseLedger, continue_response,
-        decode_response_body, fetch_enable_params, replacement_headers, replacement_response,
+        CleanupOperations, ExperimentConfig, MAX_OPERATION_TIMEOUT, MetricBuffer, PauseLedger,
+        continue_response, decode_response_body, fetch_enable_params, flush_metrics,
+        perform_cleanup, replacement_headers, replacement_response, resolve_and_buffer_metrics,
         response_requires_body,
     };
+    use crate::metrics::{MetricRecord, MetricSink, MetricStage, MetricVerdict};
 
     fn existing_file(directory: &Path, name: &str) -> std::path::PathBuf {
         let path = directory.join(name);
         fs::write(&path, b"present").unwrap();
         path
+    }
+
+    fn metric_record(fixture_index: usize) -> MetricRecord {
+        MetricRecord {
+            stage: MetricStage::Inference,
+            verdict: MetricVerdict::Allow,
+            fixture_index,
+            elapsed_micros: 1,
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("intentional telemetry failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ScriptedOutcome {
+        Success,
+        Failure(&'static str),
+        Pending,
+    }
+
+    async fn scripted_result(outcome: ScriptedOutcome) -> anyhow::Result<()> {
+        match outcome {
+            ScriptedOutcome::Success => Ok(()),
+            ScriptedOutcome::Failure(message) => anyhow::bail!(message),
+            ScriptedOutcome::Pending => std::future::pending().await,
+        }
+    }
+
+    struct ScriptedCleanup {
+        close: ScriptedOutcome,
+        kill: ScriptedOutcome,
+        wait: ScriptedOutcome,
+        handler: ScriptedOutcome,
+        aborted_handler: ScriptedOutcome,
+        calls: Vec<&'static str>,
+    }
+
+    impl ScriptedCleanup {
+        fn new(
+            close: ScriptedOutcome,
+            kill: ScriptedOutcome,
+            wait: ScriptedOutcome,
+            handler: ScriptedOutcome,
+        ) -> Self {
+            Self {
+                close,
+                kill,
+                wait,
+                handler,
+                aborted_handler: ScriptedOutcome::Success,
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl CleanupOperations for ScriptedCleanup {
+        async fn close(&mut self) -> anyhow::Result<()> {
+            self.calls.push("close");
+            scripted_result(self.close).await
+        }
+
+        async fn kill(&mut self) -> anyhow::Result<()> {
+            self.calls.push("kill");
+            scripted_result(self.kill).await
+        }
+
+        async fn wait(&mut self) -> anyhow::Result<()> {
+            self.calls.push("wait");
+            scripted_result(self.wait).await
+        }
+
+        async fn join_handler(&mut self) -> anyhow::Result<()> {
+            self.calls.push("join_handler");
+            scripted_result(self.handler).await
+        }
+
+        fn abort_handler(&mut self) {
+            self.calls.push("abort_handler");
+        }
+
+        async fn reap_aborted_handler(&mut self) -> anyhow::Result<()> {
+            self.calls.push("reap_aborted_handler");
+            scripted_result(self.aborted_handler).await
+        }
     }
 
     // Production mutation caught: accepting an externally reachable origin would let this
@@ -798,7 +1060,36 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "fixture URL must use an HTTP loopback origin"
+            "fixture URL must use the controlled http://127.0.0.1 origin"
+        );
+    }
+
+    // Production mutation caught: accepting IPv6 loopback would widen the browser boundary
+    // beyond the fixture-only policy's controlled 127.0.0.1 origin.
+    #[test]
+    fn rejects_ipv6_loopback_fixture_urls() {
+        let root = tempdir().unwrap();
+        let chromium = existing_file(root.path(), "chromium");
+        let profile = root.path().join("profile");
+        let extension = root.path().join("extension");
+        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&extension).unwrap();
+
+        let error = ExperimentConfig::new(
+            Url::parse("http://[::1]:4000/").unwrap(),
+            chromium,
+            profile,
+            extension,
+            17,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "fixture URL must use the controlled http://127.0.0.1 origin"
         );
     }
 
@@ -1056,9 +1347,140 @@ mod tests {
         ledger.resolved(&request_id).unwrap();
         assert_eq!(ledger.unresolved_count(), 0);
         assert_eq!(
+            ledger.begin(&request_id).unwrap_err().to_string(),
+            "request pause-1 was observed more than once"
+        );
+        assert_eq!(ledger.unresolved_count(), 0);
+        assert_eq!(
             ledger.resolved(&request_id).unwrap_err().to_string(),
             "request pause-1 was resolved more than once"
         );
+    }
+
+    // Production mutation caught: buffering telemetry before ledger resolution could strand a
+    // CDP pause when the fixed telemetry capacity is exhausted.
+    #[test]
+    fn telemetry_capacity_failure_cannot_leave_a_settled_pause_unresolved() {
+        let mut buffer = MetricBuffer::default();
+        buffer
+            .record((0..200).map(metric_record).collect())
+            .unwrap();
+        let mut ledger = PauseLedger::default();
+        let request_id = RequestId::new("pause-telemetry-capacity");
+        ledger.begin(&request_id).unwrap();
+
+        let error = resolve_and_buffer_metrics(
+            &mut ledger,
+            &request_id,
+            &mut buffer,
+            vec![metric_record(200)],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "response metrics exceed the 200-record bound"
+        );
+        assert_eq!(ledger.unresolved_count(), 0);
+    }
+
+    // Production mutation caught: moving arbitrary writer I/O back onto the interception path
+    // could let a telemetry error prevent an already-resolved response from reaching cleanup.
+    #[test]
+    fn writer_failure_happens_only_after_pause_resolution() {
+        let mut buffer = MetricBuffer::default();
+        let mut ledger = PauseLedger::default();
+        let request_id = RequestId::new("pause-telemetry-writer");
+        ledger.begin(&request_id).unwrap();
+        resolve_and_buffer_metrics(
+            &mut ledger,
+            &request_id,
+            &mut buffer,
+            vec![metric_record(1)],
+        )
+        .unwrap();
+
+        let error = flush_metrics(buffer, &mut MetricSink::new(FailingWriter)).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "failed to write buffered privacy-safe response metric"
+        );
+        assert_eq!(ledger.unresolved_count(), 0);
+    }
+
+    // Production mutation caught: treating a successful kill fallback as graceful shutdown would
+    // hide the failed close that forced Chromium termination.
+    #[tokio::test]
+    async fn forced_reap_is_never_classified_as_clean_shutdown() {
+        let mut cleanup = ScriptedCleanup::new(
+            ScriptedOutcome::Failure("close broke"),
+            ScriptedOutcome::Success,
+            ScriptedOutcome::Success,
+            ScriptedOutcome::Success,
+        );
+
+        let report = perform_cleanup(&mut cleanup, Duration::from_millis(1)).await;
+
+        assert!(report.forced_reap());
+        assert!(!report.is_clean());
+        assert_eq!(
+            report.into_result().unwrap_err().to_string(),
+            "failed to close Chromium gracefully: close broke"
+        );
+        assert_eq!(cleanup.calls, ["close", "kill", "wait", "join_handler"]);
+    }
+
+    // Production mutation caught: returning early on a kill error or timeout would skip bounded
+    // process wait and handler termination attempts.
+    #[tokio::test]
+    async fn kill_error_and_timeout_still_attempt_wait_and_handler_termination() {
+        for (kill, expected) in [
+            (
+                ScriptedOutcome::Failure("kill broke"),
+                "failed to kill Chromium after close failure: kill broke",
+            ),
+            (ScriptedOutcome::Pending, "Chromium kill deadline elapsed"),
+        ] {
+            let mut cleanup = ScriptedCleanup::new(
+                ScriptedOutcome::Failure("close broke"),
+                kill,
+                ScriptedOutcome::Success,
+                ScriptedOutcome::Success,
+            );
+
+            let report = perform_cleanup(&mut cleanup, Duration::from_millis(1)).await;
+            let error = report.into_result().unwrap_err().to_string();
+
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(cleanup.calls, ["close", "kill", "wait", "join_handler"]);
+        }
+    }
+
+    // Production mutation caught: returning early on a process wait error or timeout would skip
+    // the final bounded Chromiumoxide handler termination attempt.
+    #[tokio::test]
+    async fn wait_error_and_timeout_still_attempt_handler_termination() {
+        for (wait, expected) in [
+            (
+                ScriptedOutcome::Failure("wait broke"),
+                "failed to wait for Chromium: wait broke",
+            ),
+            (ScriptedOutcome::Pending, "Chromium wait deadline elapsed"),
+        ] {
+            let mut cleanup = ScriptedCleanup::new(
+                ScriptedOutcome::Success,
+                ScriptedOutcome::Success,
+                wait,
+                ScriptedOutcome::Success,
+            );
+
+            let report = perform_cleanup(&mut cleanup, Duration::from_millis(1)).await;
+            let error = report.into_result().unwrap_err().to_string();
+
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(cleanup.calls, ["close", "wait", "join_handler"]);
+        }
     }
 
     // Production mutation caught: requesting a body for redirects, 204/304, or response failures
