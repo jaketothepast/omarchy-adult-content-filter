@@ -223,7 +223,7 @@ Assert the server binds to `127.0.0.1:0`, `/` emits the requested number of imag
 
 - [ ] **Step 2: Run focused tests and confirm failure**
 
-Run: `cargo test -p omarchy-kids-browser-filter fixture::tests policy::tests metrics::tests`
+Run: `cargo test -p omarchy-kids-browser-filter --lib`
 
 Expected: FAIL because the three modules do not exist.
 
