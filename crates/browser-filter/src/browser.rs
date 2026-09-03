@@ -35,6 +35,7 @@ use crate::{
 
 const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BUFFERED_METRICS: usize = 2 * 100;
+const MAX_REVEAL_LATENCY: Duration = Duration::from_millis(500);
 const COVER_RGBA: [u8; 4] = [17, 19, 24, 255];
 const PLACEHOLDER_RGBA: [u8; 4] = [255, 0, 255, 255];
 
@@ -693,6 +694,28 @@ fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+#[derive(Debug)]
+struct ValidatedRevealLatency(Duration);
+
+impl ValidatedRevealLatency {
+    fn between(final_response_settled_at: Instant, readiness_applied_at: Instant) -> Result<Self> {
+        let duration = readiness_applied_at
+            .checked_duration_since(final_response_settled_at)
+            .context("readiness completion preceded final response settlement")?;
+        anyhow::ensure!(
+            duration <= MAX_REVEAL_LATENCY,
+            "reveal latency of {}ns exceeds the {}ns limit",
+            duration.as_nanos(),
+            MAX_REVEAL_LATENCY.as_nanos()
+        );
+        Ok(Self(duration))
+    }
+
+    fn summary_millis(&self) -> u64 {
+        duration_millis(self.0)
+    }
+}
+
 async fn run_page(
     browser: &Browser,
     worker: &InferenceWorker,
@@ -731,7 +754,7 @@ async fn run_page(
     let mut navigation = Box::pin(page.goto(config.fixture_url.as_str()));
     let mut navigation_complete = false;
     let mut completed_images = 0;
-    let mut last_response_resolved_at = None;
+    let mut final_response_settled_at = None;
     let mut counts = RunCounts::default();
     let mut no_flash = config.no_flash_hold.map(NoFlashCapture::new);
     while completed_images < config.image_count {
@@ -742,7 +765,7 @@ async fn run_page(
             }
             event = pauses.next() => {
                 let event = event.context("Fetch.requestPaused stream ended before all fixture images resolved")?;
-                if process_pause(
+                let outcome = process_pause(
                     &page,
                     event.as_ref(),
                     worker,
@@ -752,10 +775,11 @@ async fn run_page(
                     &ledger,
                     &mut counts,
                     &mut no_flash,
-                ).await? {
+                ).await?;
+                if outcome.terminal_response {
                     completed_images += 1;
                     if completed_images == config.image_count {
-                        last_response_resolved_at = Some(Instant::now());
+                        final_response_settled_at = Some(outcome.settled_at);
                     }
                 }
             }
@@ -765,7 +789,7 @@ async fn run_page(
         navigation.await.context("fixture navigation failed")?;
     }
 
-    let ready = tokio::time::timeout(
+    let readiness_result = tokio::time::timeout(
         config.acquisition_timeout,
         page.evaluate(
             r#"(() => {
@@ -776,15 +800,18 @@ async fn run_page(
     )
     .await
     .context("fixture reveal deadline elapsed")?
-    .context("failed to set fixture readiness")?
-    .into_value::<bool>()
-    .context("fixture readiness result had an unexpected shape")?;
+    .context("failed to set fixture readiness")?;
+    let readiness_applied_at = Instant::now();
+    let ready = readiness_result
+        .into_value::<bool>()
+        .context("fixture readiness result had an unexpected shape")?;
     anyhow::ensure!(ready, "fixture readiness attribute was not set");
-    let reveal_latency_millis = duration_millis(
-        last_response_resolved_at
-            .context("last fixture response resolution time was not recorded")?
-            .elapsed(),
-    );
+    let reveal_latency = ValidatedRevealLatency::between(
+        final_response_settled_at
+            .context("final fixture response settlement time was not recorded")?,
+        readiness_applied_at,
+    )?;
+    let reveal_latency_millis = reveal_latency.summary_millis();
     if let Some(assertion) = no_flash.as_mut() {
         assertion
             .capture_reveal(&page, config.image_count, config.acquisition_timeout)
@@ -849,6 +876,11 @@ struct PreparedDecision {
     metrics: Vec<MetricRecord>,
 }
 
+struct PauseOutcome {
+    terminal_response: bool,
+    settled_at: Instant,
+}
+
 #[derive(Default)]
 struct MetricBuffer {
     records: Vec<MetricRecord>,
@@ -870,9 +902,13 @@ fn resolve_and_buffer_metrics(
     request_id: &RequestId,
     metrics: &mut MetricBuffer,
     records: Vec<MetricRecord>,
-) -> Result<()> {
+) -> Result<Instant> {
     ledger.resolved(request_id)?;
-    metrics.record(records)
+    metrics.record(records)?;
+    // This is the response-settlement boundary: the CDP continue/fulfill and matching count update
+    // have already succeeded in process_pause, and the synchronous ledger removal plus bounded
+    // metric append have now completed. Caller dispatch and all reveal work happen after this stamp.
+    Ok(Instant::now())
 }
 
 fn flush_metrics<W: std::io::Write>(metrics: MetricBuffer, sink: &mut MetricSink<W>) -> Result<()> {
@@ -894,7 +930,7 @@ async fn process_pause(
     ledger: &Arc<Mutex<PauseLedger>>,
     counts: &mut RunCounts,
     no_flash: &mut Option<NoFlashCapture>,
-) -> Result<bool> {
+) -> Result<PauseOutcome> {
     ledger
         .lock()
         .expect("pause ledger mutex poisoned")
@@ -953,7 +989,7 @@ async fn process_pause(
         .context("failed to continue image response")?;
         counts.continued += 1;
     }
-    resolve_and_buffer_metrics(
+    let settled_at = resolve_and_buffer_metrics(
         &mut ledger.lock().expect("pause ledger mutex poisoned"),
         &event.request_id,
         metrics,
@@ -963,7 +999,10 @@ async fn process_pause(
     if let Some(failure) = prepared.failure_after_resolution {
         anyhow::bail!(failure);
     }
-    Ok(prepared.terminal_response)
+    Ok(PauseOutcome {
+        terminal_response: prepared.terminal_response,
+        settled_at,
+    })
 }
 
 async fn prepare_decision(
@@ -1252,7 +1291,12 @@ impl PauseLedger {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Write, path::Path, time::Duration};
+    use std::{
+        fs,
+        io::Write,
+        path::Path,
+        time::{Duration, Instant},
+    };
 
     use base64::{Engine as _, prelude::BASE64_STANDARD};
     use chromiumoxide::cdp::browser_protocol::{
@@ -1265,25 +1309,50 @@ mod tests {
 
     use super::{
         CleanupOperations, DomImageMetadata, ExperimentConfig, MAX_OPERATION_TIMEOUT, MetricBuffer,
-        PauseLedger, assert_cover_screenshot, assert_dom_image_colors, assert_reveal_screenshot,
-        continue_response, decode_response_body, fetch_enable_params, flush_metrics,
-        perform_cleanup, replacement_headers, replacement_response, resolve_and_buffer_metrics,
-        response_requires_body,
+        PauseLedger, ValidatedRevealLatency, assert_cover_screenshot, assert_dom_image_colors,
+        assert_reveal_screenshot, continue_response, decode_response_body, fetch_enable_params,
+        flush_metrics, perform_cleanup, replacement_headers, replacement_response,
+        resolve_and_buffer_metrics, response_requires_body,
     };
     use crate::metrics::{MetricRecord, MetricSink, MetricStage, MetricVerdict};
 
-    // Production mutation caught: dropping or weakening any declared content-script field would
-    // let Chromium render page children before the supervisor has resolved the initial images.
+    // Production mutation caught: adding permissions, executable resources, undeclared files, or
+    // remote CSS loads would widen this permissionless declarative cover into executable behavior.
     #[test]
     fn extension_contract_declares_a_permissionless_document_start_cover() {
         let extension = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../browser-extension");
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(extension.join("manifest.json")).unwrap()).unwrap();
 
+        let mut manifest_keys = manifest.as_object().unwrap().keys().collect::<Vec<_>>();
+        manifest_keys.sort_unstable();
+        assert_eq!(
+            manifest_keys,
+            ["content_scripts", "manifest_version", "name", "version"]
+        );
         assert_eq!(manifest["manifest_version"], 3);
         assert!(manifest.get("permissions").is_none());
+        assert!(manifest.get("host_permissions").is_none());
+        assert!(manifest.get("background").is_none());
+        assert!(manifest.get("web_accessible_resources").is_none());
         let content_scripts = manifest["content_scripts"].as_array().unwrap();
         assert_eq!(content_scripts.len(), 1);
+        let mut content_script_keys = content_scripts[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>();
+        content_script_keys.sort_unstable();
+        assert_eq!(
+            content_script_keys,
+            [
+                "all_frames",
+                "css",
+                "match_about_blank",
+                "matches",
+                "run_at"
+            ]
+        );
         assert_eq!(
             content_scripts[0]["matches"],
             serde_json::json!(["<all_urls>"])
@@ -1294,7 +1363,17 @@ mod tests {
         assert_eq!(content_scripts[0]["match_about_blank"], true);
         assert!(content_scripts[0].get("js").is_none());
 
+        let mut extension_files = fs::read_dir(&extension)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        extension_files.sort_unstable();
+        assert_eq!(extension_files, ["cover.css", "manifest.json"]);
+
         let css = fs::read_to_string(extension.join("cover.css")).unwrap();
+        let lowercase_css = css.to_ascii_lowercase();
+        assert!(!lowercase_css.contains("@import"));
+        assert!(!lowercase_css.contains("url("));
         assert!(css.contains("html:not([data-omarchy-kids-ready]) {"));
         assert!(css.contains("background: #111318 !important;"));
         assert!(css.contains("html:not([data-omarchy-kids-ready]) > * {"));
@@ -1418,6 +1497,43 @@ mod tests {
         assert_eq!(
             assert_dom_image_colors(&images, 1).unwrap_err().to_string(),
             "DOM image 1 rendered [1, 0, 0, 255], expected [255, 0, 255, 255]"
+        );
+    }
+
+    // Production mutation caught: rounding before enforcing the reveal gate would let a duration
+    // just over 500 ms serialize as 500 ms and incorrectly pass.
+    #[test]
+    fn reveal_latency_gate_accepts_exact_limit_and_rejects_one_nanosecond_over() {
+        let settled_at = Instant::now();
+        let at_limit =
+            ValidatedRevealLatency::between(settled_at, settled_at + Duration::from_millis(500))
+                .unwrap();
+        assert_eq!(at_limit.summary_millis(), 500);
+
+        assert_eq!(
+            ValidatedRevealLatency::between(
+                settled_at,
+                settled_at + Duration::from_millis(500) + Duration::from_nanos(1),
+            )
+            .unwrap_err()
+            .to_string(),
+            "reveal latency of 500000001ns exceeds the 500000000ns limit"
+        );
+    }
+
+    // Production mutation caught: taking the completion timestamp after revealed-frame capture or
+    // PNG decoding would charge later assertion work to response-to-readiness latency.
+    #[test]
+    fn validated_reveal_latency_excludes_later_screenshot_and_decode_work() {
+        let settled_at = Instant::now();
+        let readiness_applied_at = settled_at + Duration::from_millis(125);
+        let latency = ValidatedRevealLatency::between(settled_at, readiness_applied_at).unwrap();
+        let screenshot_decoded_at = readiness_applied_at + Duration::from_secs(9);
+
+        assert_eq!(latency.summary_millis(), 125);
+        assert_eq!(
+            screenshot_decoded_at.duration_since(settled_at),
+            Duration::from_millis(9_125)
         );
     }
 
@@ -1853,6 +1969,31 @@ mod tests {
             "response metrics exceed the 200-record bound"
         );
         assert_eq!(ledger.unresolved_count(), 0);
+    }
+
+    // Production mutation caught: stamping settlement in caller dispatch would include unrelated
+    // post-settlement work rather than the completed ledger and bounded-metric boundary.
+    #[test]
+    fn settlement_helper_returns_its_own_completion_timestamp() {
+        let mut buffer = MetricBuffer::default();
+        let mut ledger = PauseLedger::default();
+        let request_id = RequestId::new("pause-settlement-time");
+        ledger.begin(&request_id).unwrap();
+        let before_settlement = Instant::now();
+
+        let settled_at = resolve_and_buffer_metrics(
+            &mut ledger,
+            &request_id,
+            &mut buffer,
+            vec![metric_record(1)],
+        )
+        .unwrap();
+        let after_return = Instant::now();
+
+        assert!(settled_at >= before_settlement);
+        assert!(settled_at <= after_return);
+        assert_eq!(ledger.unresolved_count(), 0);
+        assert_eq!(buffer.records.len(), 1);
     }
 
     // Production mutation caught: moving arbitrary writer I/O back onto the interception path
