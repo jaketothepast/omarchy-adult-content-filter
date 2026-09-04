@@ -18,6 +18,19 @@ With `--json`, `run` writes one headed-experiment summary to stdout, including c
 
 The measured 2026-09-03 environment, complete p50/p90/p95 benchmark output, browser assertions, performance-gate assessment, and limitations are in [docs/experiment-results.md](docs/experiment-results.md).
 
+## Drive the host-side managed browser
+
+```bash
+nix run .#browse
+nix run .#browse -- --url https://example.com --json
+```
+
+`browse` opens one headed Chromium tab with a new disposable profile and remains attached until the tab/browser is closed or the terminal receives Ctrl-C. A successful HTTP 200 static JPEG or non-animated PNG continues only after local inference returns `Policy::Allow`. Redirects without a rendered body continue. Animated and other formats, plus every body-read, size, decode, model, worker, or policy-processing failure, replace that individual image with the placeholder. Body acquisition, inference, and CDP response settlement each have a five-second deadline; browser launch and cleanup have a thirty-second deadline. There is no total browsing-session deadline. Additional page targets are closed, and failure to close or settle a response closes the managed browser.
+
+The document-start cover stays opaque until the active top-level loader reports `load` and no intercepted image response remains unresolved. The final summary contains only model/runtime identity and aggregate counts—never URLs, titles, response bytes, paths, or history. Closing the browser removes the disposable profile.
+
+This is a supervised engineering prototype, not a child-safe browser. It does not yet inspect video, audio, canvas, WebGL, CSS backgrounds, `data:` or `blob:` content, downloads, browser chrome, DevTools, or adversarial/tampered pages. Subframes remain covered because this version reveals only the supervised top-level document. Do not use it as unsupervised child protection.
+
 ## Build and test the private controlled demo ISO
 
 ```bash
@@ -35,11 +48,12 @@ Enter the pinned development environment and run the workspace tests:
 nix develop -c cargo test --workspace
 ```
 
-The flake exposes four runnable experiment apps:
+The flake exposes five runnable experiment apps:
 
 - `infer` runs standalone model inference.
 - `bench` measures the 1-, 13-, 19-, and 62-image workloads.
 - `run` launches the controlled headed-browser experiment.
+- `browse` launches the persistent single-tab host prototype.
 - `check` runs formatting, lint, and workspace tests.
 
 The binary reserves a `doctor` subcommand as an explicitly unimplemented placeholder. It exits with `doctor is not implemented` and is not exposed as a Nix app; the separate ISO workflow milestone owns the real environment doctor.

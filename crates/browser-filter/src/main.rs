@@ -16,9 +16,13 @@ use omarchy_kids_browser_filter::inference::{
     DEFAULT_MAX_ENCODED_BYTES, DEFAULT_MAX_PIXELS, Detector, InferenceReport, MODEL_SHA256,
     ModelConfig,
 };
+use omarchy_kids_browser_filter::managed::{
+    ManagedBrowser, ManagedBrowserConfig, ManagedBrowserSummary,
+};
 use omarchy_kids_browser_filter::metrics::MetricSink;
 use omarchy_kids_browser_filter::policy::Policy;
 use serde::Serialize;
+use url::Url;
 
 #[cfg(test)]
 use clap::CommandFactory;
@@ -56,6 +60,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    Browse {
+        #[arg(long)]
+        url: Option<Url>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -81,7 +91,58 @@ fn main() -> Result<()> {
             assert_no_flash,
             json,
         } => run(images, flagged_index, hold_millis, assert_no_flash, json),
+        Command::Browse { url, json } => browse(url, json),
     }
+}
+
+fn browse(start_url: Option<Url>, json: bool) -> Result<()> {
+    let profile = tempfile::Builder::new()
+        .prefix("omarchy-kids-browser-")
+        .tempdir()
+        .context("failed to create disposable Chromium profile")?;
+    let profile_path = profile.path().to_path_buf();
+    let config = ManagedBrowserConfig::new(
+        start_url,
+        PathBuf::from(std::env::var_os("CHROMIUM_BIN").context("CHROMIUM_BIN is not set")?),
+        profile_path.clone(),
+        PathBuf::from(
+            std::env::var_os("OMARCHY_KIDS_EXTENSION_DIR")
+                .context("OMARCHY_KIDS_EXTENSION_DIR is not set")?,
+        ),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    )?;
+    let summary = ManagedBrowser::new(load_detector()?, Policy).run(config)?;
+
+    drop(profile);
+    anyhow::ensure!(
+        !profile_path.exists(),
+        "disposable Chromium profile was not removed"
+    );
+    write_managed_output(&mut std::io::stdout().lock(), &summary, json)
+}
+
+fn write_managed_output<W: Write>(
+    writer: &mut W,
+    summary: &ManagedBrowserSummary,
+    json: bool,
+) -> Result<()> {
+    if json {
+        serde_json::to_writer(&mut *writer, summary)?;
+        writeln!(writer)?;
+    } else {
+        writeln!(
+            writer,
+            "{} intercepted, {} continued, {} replaced ({} fail-closed), {} extra pages blocked",
+            summary.intercepted,
+            summary.continued,
+            summary.replaced,
+            summary.failed_closed,
+            summary.blocked_extra_pages,
+        )?;
+    }
+    Ok(())
 }
 
 fn run(
@@ -234,6 +295,33 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
 #[test]
 fn cli_definition_is_valid() {
     Cli::command().debug_assert();
+}
+
+#[test]
+fn browse_cli_accepts_a_blank_start_or_one_web_url() {
+    let blank = Cli::try_parse_from(["filter", "browse", "--json"]).unwrap();
+    assert!(matches!(
+        blank.command,
+        Command::Browse {
+            url: None,
+            json: true
+        }
+    ));
+
+    let started =
+        Cli::try_parse_from(["filter", "browse", "--url", "https://example.test/"]).unwrap();
+    assert!(matches!(
+        started.command,
+        Command::Browse {
+            url: Some(url),
+            json: false
+        } if url.as_str() == "https://example.test/"
+    ));
+}
+
+#[test]
+fn browse_cli_rejects_a_malformed_url() {
+    assert!(Cli::try_parse_from(["filter", "browse", "--url", "not a URL"]).is_err());
 }
 
 // Production mutation caught: removing or renaming a benchmark option, or parsing its numeric

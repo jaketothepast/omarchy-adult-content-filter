@@ -94,6 +94,12 @@ in
     command = "${package}/bin/omarchy-kids-browser-filter run";
   };
 
+  browse = mkApp {
+    name = "browse";
+    description = "Run the persistent single-tab managed Chromium prototype";
+    command = "${package}/bin/omarchy-kids-browser-filter browse";
+  };
+
   check = mkApp {
     name = "check";
     description = "Run formatting, lint, and workspace tests";

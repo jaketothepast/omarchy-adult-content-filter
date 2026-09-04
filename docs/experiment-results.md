@@ -368,6 +368,12 @@ No production source changed during this build/install/acceptance task, no asser
 
 All artifacts and commits remain local. No push, fetch, fork, pull request, remote change, upload, or evidence deletion was performed.
 
+## Persistent managed-browser host smoke
+
+On 2026-09-04, the new persistent `browse` path ran outside the VM against an ephemeral loopback page containing one harmless static PNG and one response labeled as PNG whose bytes were deliberately undecodable. Chromium `152.0.7977.75` and ONNX Runtime `1.27.1` loaded the pinned model SHA-256 `c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f`. Closing the supervised tab and, in a separate run, delivering SIGINT directly to the controller each returned exit zero with the same privacy-safe result: two intercepted, one continued, one replaced, one failed closed, zero unresolved, and clean shutdown. The startup page was also closed and counted as one blocked extra page. No managed Chromium process remained.
+
+The smoke also surfaced and fixed two fail-safe orchestration defects before handoff: initial navigation had to run concurrently with paused response handling, and primary-page event streams end just before the global target-destroyed event during normal tab closure. A self-review then restricted successful manual-mode analysis to static JPEG and non-animated PNG so animated or partially analyzed formats are replaced. This is pipeline evidence for a driveable supervised session, not evidence of classifier accuracy or production child safety.
+
 ## What remains unproven
 
 - Semantic parity with the upstream Python reference remains unverified because no checked-in reference golden was established. The verified model hash/runtime execution and colored-pixel preprocessing regressions are real evidence, but they are not a reference-parity gate.
@@ -379,6 +385,6 @@ All artifacts and commits remain local. No push, fetch, fork, pull request, remo
 - The page cover is a pipeline-spike mechanism and is not tamper-resistant against hostile page script.
 - The experiment uses an ephemeral loopback DevTools endpoint. Production would need a private inherited pipe or equivalently confined control channel.
 - The benchmark uses a small repeating synthetic corpus and does not establish accuracy, content diversity, peak memory, long-run stability, or minimum supported hardware.
-- The upstream baseline and the separate private Kids package/install/controlled-fixture paths are now proven on this machine, but arbitrary-navigation supervision, managed-browser policy, filter-service startup, default-browser integration, and bypass-resistant enforcement remain unperformed.
+- The upstream baseline, private Kids package/install/controlled-fixture paths, and one persistent loopback-navigation smoke are proven on this machine, but real-world arbitrary-site validation, filter-service startup, default-browser integration, and bypass-resistant enforcement remain unperformed.
 
 The next milestone may treat the controlled interception architecture as demonstrated, but production work must not treat this result as a pornography-classification validation or deployment approval.
