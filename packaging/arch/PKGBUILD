@@ -79,6 +79,6 @@ package() {
   install -Dm644 "$srcdir/onnxruntime-linux-x64-${_onnxruntime_version}/ThirdPartyNotices.txt" "$license_dir/onnxruntime-ThirdPartyNotices.txt"
   install -Dm644 "$srcdir/omarchy-adult-content-filter/packaging/NOTICES.md" "$license_dir/NOTICES.md"
   install -Dm644 "$srcdir/nudenet-LICENSE" "$license_dir/nudenet-LICENSE"
-  install -Dm644 "$srcdir/nudenet-setup.py" "$license_dir/nudenet-setup.py"
+  install -Dm644 "$srcdir/nudenet-setup.py" "$license_dir/nudenet-package-metadata.txt"
   install -Dm644 "$srcdir/stevenblack-license.txt" "$license_dir/stevenblack-license.txt"
 }

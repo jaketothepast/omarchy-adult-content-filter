@@ -63,7 +63,7 @@ EOF
     LICENSE \
     NOTICES.md \
     nudenet-LICENSE \
-    nudenet-setup.py \
+    nudenet-package-metadata.txt \
     onnxruntime-LICENSE \
     onnxruntime-ThirdPartyNotices.txt \
     stevenblack-license.txt; do
@@ -125,7 +125,7 @@ share/browser-extension/manifest.json
 share/licenses/LICENSE
 share/licenses/NOTICES.md
 share/licenses/nudenet-LICENSE
-share/licenses/nudenet-setup.py
+share/licenses/nudenet-package-metadata.txt
 share/licenses/onnxruntime-LICENSE
 share/licenses/onnxruntime-ThirdPartyNotices.txt
 share/licenses/stevenblack-license.txt

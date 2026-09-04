@@ -22,6 +22,6 @@ The StevenBlack hosts repository is distributed under the MIT License. The list 
 
 The bundle includes `320n.onnx` from NudeNet commit `6ccc81c6c305cccfd46d92b414f8a5c0a816574d`, pinned by SHA-256 `c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f`.
 
-At that commit, NudeNet's repository-root `LICENSE` is the GNU Affero General Public License version 3 and is pinned by SHA-256 `8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef`. The model is redistributed with that license in the runtime bundle. The upstream `setup.py`, pinned by SHA-256 `acef07396af96db42374fc2f26799111d0989873f00da5494ac54a0ecf83ff09`, contains an older `MIT` package classifier; it is preserved alongside the license for transparency.
+At that commit, NudeNet's repository-root `LICENSE` is the GNU Affero General Public License version 3 and is pinned by SHA-256 `8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef`. The model is redistributed with that license in the runtime bundle. The upstream `setup.py`, pinned by SHA-256 `acef07396af96db42374fc2f26799111d0989873f00da5494ac54a0ecf83ff09`, contains an older `MIT` package classifier; those exact source bytes are preserved as non-executable `nudenet-package-metadata.txt` alongside the license for transparency.
 
 The model is a third-party classifier and comes without a promise of accuracy, fitness, or complete coverage. This project makes no representation about its training-data provenance.

@@ -232,3 +232,24 @@ fn marketplace_discovers_only_the_root_plugin_manifest() {
     manifests.sort();
     assert_eq!(manifests, ["manifest.json"]);
 }
+
+#[test]
+fn marketplace_surface_avoids_unrelated_privilege_and_installer_capabilities() {
+    let readme = read("README.md");
+    assert!(
+        !readme.contains("sudo"),
+        "browser-only documentation must not look like a privilege request"
+    );
+
+    let runtime_licenses = workspace_path("runtime/share/licenses");
+    let setup_files = fs::read_dir(runtime_licenses)
+        .expect("runtime licenses must be readable")
+        .map(|entry| entry.expect("license entry must be readable").file_name())
+        .filter(|name| name.to_string_lossy().ends_with("setup.py"))
+        .collect::<Vec<_>>();
+    assert!(
+        setup_files.is_empty(),
+        "license evidence must not be exposed as an executable installer: {setup_files:?}"
+    );
+    assert!(workspace_path("runtime/share/licenses/nudenet-package-metadata.txt").is_file());
+}

@@ -54,7 +54,7 @@ usr/share/applications/omarchy-adult-content-filter.desktop
 usr/share/licenses/omarchy-adult-content-filter/LICENSE
 usr/share/licenses/omarchy-adult-content-filter/NOTICES.md
 usr/share/licenses/omarchy-adult-content-filter/nudenet-LICENSE
-usr/share/licenses/omarchy-adult-content-filter/nudenet-setup.py
+usr/share/licenses/omarchy-adult-content-filter/nudenet-package-metadata.txt
 usr/share/licenses/omarchy-adult-content-filter/onnxruntime-LICENSE
 usr/share/licenses/omarchy-adult-content-filter/onnxruntime-ThirdPartyNotices.txt
 usr/share/licenses/omarchy-adult-content-filter/stevenblack-license.txt
@@ -111,7 +111,7 @@ for license_file in \
   LICENSE \
   NOTICES.md \
   nudenet-LICENSE \
-  nudenet-setup.py \
+  nudenet-package-metadata.txt \
   onnxruntime-LICENSE \
   onnxruntime-ThirdPartyNotices.txt \
   stevenblack-license.txt; do

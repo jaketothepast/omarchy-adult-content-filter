@@ -45,7 +45,7 @@ required_files=(
   /usr/share/licenses/omarchy-adult-content-filter/onnxruntime-ThirdPartyNotices.txt
   /usr/share/licenses/omarchy-adult-content-filter/NOTICES.md
   /usr/share/licenses/omarchy-adult-content-filter/nudenet-LICENSE
-  /usr/share/licenses/omarchy-adult-content-filter/nudenet-setup.py
+  /usr/share/licenses/omarchy-adult-content-filter/nudenet-package-metadata.txt
   /usr/share/licenses/omarchy-adult-content-filter/stevenblack-license.txt
 )
 

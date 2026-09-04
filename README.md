@@ -47,7 +47,7 @@ Inference runs locally. Telemetry is written only to the launching terminal as b
 
 ## Security boundary
 
-This plugin provides browser-only protection. It does not install a system service, autostart entry, MIME association, default-browser handler, user account, sudo rule, or machine-wide Chromium policy. It does not prevent a user from launching another browser or modifying the machine when that user already has administrative access.
+This plugin provides browser-only protection. It does not install a system service, autostart entry, MIME association, default-browser handler, user account, elevated-access rule, or machine-wide Chromium policy. It does not prevent a user from launching another browser or modifying the machine when that user already has administrative access.
 
 It is therefore an adult-content filtering browser, not a child account or anti-tamper system. Pair it later with a separately reviewed restricted-user policy if the machine must prevent bypass. The classifier, domain list, and browser interception are defense-in-depth controls rather than a promise that every adult page or adversarial rendering will be detected.
 
