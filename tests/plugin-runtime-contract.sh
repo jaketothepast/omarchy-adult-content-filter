@@ -48,8 +48,6 @@ make_fixture() {
   printf 'body {}\n' >"$runtime/share/browser-extension/cover.css"
   printf 'runtime\n' >"$runtime/lib/onnxruntime/libonnxruntime.so.1.27.1"
   chmod 0755 "$runtime/lib/onnxruntime/libonnxruntime.so.1.27.1"
-  ln -s libonnxruntime.so.1.27.1 "$runtime/lib/onnxruntime/libonnxruntime.so.1"
-  ln -s libonnxruntime.so.1 "$runtime/lib/onnxruntime/libonnxruntime.so"
 
   cat >"$runtime/bin/omarchy-adult-content-filter" <<'EOF'
 #!/bin/bash
@@ -108,7 +106,7 @@ grep -Fxq "HOME=$runtime_root" "$record" || fail "wrapper confines HOME"
 grep -Fxq "TMPDIR=$runtime_root" "$record" || fail "wrapper confines TMPDIR"
 grep -Fxq "PROFILE=$runtime_root" "$record" || fail "wrapper confines the Chromium profile"
 grep -Fxq 'CHROMIUM=/usr/bin/chromium' "$record" || fail "wrapper uses system Chromium"
-grep -Fxq "ORT=$plugin/runtime/lib/onnxruntime/libonnxruntime.so.1" "$record" || fail "wrapper uses bundled ONNX Runtime"
+grep -Fxq "ORT=$plugin/runtime/lib/onnxruntime/libonnxruntime.so.1.27.1" "$record" || fail "wrapper uses bundled ONNX Runtime"
 grep -Fxq "MODEL=$plugin/runtime/share/models/320n.onnx" "$record" || fail "wrapper uses bundled model"
 grep -Fxq "EXTENSION=$plugin/runtime/share/browser-extension" "$record" || fail "wrapper uses bundled extension"
 grep -Fxq "BLOCKLIST=$plugin/runtime/share/policies/adult-domains.hosts" "$record" || fail "wrapper uses bundled domain policy"
@@ -138,14 +136,15 @@ assert_status 78 env \
 pass "wrapper rejects corrupt bundled bytes before launch"
 
 fixture=$(make_fixture escaped-link)
-ln -sfn /etc/passwd "$fixture/plugin/runtime/lib/onnxruntime/libonnxruntime.so.1"
+rm -- "$fixture/plugin/runtime/lib/onnxruntime/libonnxruntime.so.1.27.1"
+ln -s /etc/passwd "$fixture/plugin/runtime/lib/onnxruntime/libonnxruntime.so.1.27.1"
 assert_status 78 env \
   PLUGIN_RUNTIME_TEST_RECORD="$fixture/record" \
   PLUGIN_RUNTIME_TEST_STARTED="$fixture/started" \
   XDG_RUNTIME_DIR="$fixture/xdg" \
   "$fixture/plugin/bin/omarchy-adult-content-filter"
 [[ ! -e $fixture/started ]] || fail "escaped runtime link reached the supervisor"
-pass "wrapper rejects a bundled symlink escape before launch"
+pass "wrapper rejects a bundled native-library symlink before launch"
 
 fixture=$(make_fixture duplicate)
 release="$fixture/release"

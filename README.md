@@ -1,57 +1,94 @@
 # Omarchy Adult Content Filter
 
-This repository builds an opt-in, browser-only adult-content filtering package for Omarchy. The installed application launches a dedicated managed Chromium instance with its own disposable profile; it does not modify the user's ordinary Chromium profile or make itself the system default browser.
+![Omarchy Adult Content Filter](preview.png)
 
-Filtering is layered:
+An opt-in Omarchy plugin that launches and supervises a dedicated Chromium session with layered adult-content filtering. Everything except Chromium is bundled in this plugin repository: the Rust supervisor, ONNX Runtime, pinned NudeNet model, adult-domain policy, document cover, and third-party notices travel as one unit.
 
-1. A pinned adult-domain list blocks matching requests before network access.
-2. Google searches are rewritten to force SafeSearch, and YouTube requests receive the strict restricted-mode header.
-3. A document-start cover prevents unreviewed page imagery from flashing onscreen.
-4. Successful static JPEG and PNG responses are inspected locally with the pinned NudeNet ONNX model. Explicit detections are replaced; decoding, model, timeout, and policy failures are also replaced.
-5. Replacing an image taints its connected media control, so a thumbnail associated with a video prevents that video from playing without blocking unrelated videos on the page.
+The plugin leaves your normal Chromium profile and default-browser setting alone. Its bar widget starts one managed browser, reports its state, and stops the same supervised process.
 
-The managed instance permits one page, denies downloads, disables DevTools, accepts only complete HTTP(S) top-level navigations, and fails closed when it cannot settle an intercepted response or cleanly maintain its supervision boundary.
+## Install
 
-## Installable Omarchy package
+Requirements:
 
-The plugin-facing package and command are both named `omarchy-adult-content-filter`. The package contains the Rust supervisor, private ONNX Runtime, pinned NudeNet model, pinned domain policy, cover extension, desktop entry, and notices. It deliberately installs no system service, autostart entry, MIME association, default-browser handler, user account, sudo rule, or global Chromium policy.
+- Omarchy with plugin support
+- The standard Omarchy Chromium package at `/usr/bin/chromium`
+- An x86-64 system
 
-After installation, launch **Omarchy Adult Content Filter** from the app menu or run:
+Install and enable the plugin:
 
 ```bash
-omarchy-adult-content-filter
+omarchy plugin add https://github.com/jaketothepast/omarchy-adult-content-filter
+omarchy plugin enable io.github.jaketothepast.adult-content-filter
 ```
 
-The public launcher accepts no arguments and refuses to run as root. Runtime state and the Chromium profile stay beneath its private directory in `XDG_RUNTIME_DIR` and are removed when the browser exits.
+Add **Adult Content Filter** to the right side of the Omarchy bar if it is not added automatically. Left-click the shield to launch the managed browser. Right-click it to stop the browser.
 
-This browser-only package does not prevent a user from launching another browser, replacing the executable, or changing the machine when that user already has administrative access. Account restrictions and OS-level enforcement are intentionally deferred to a separate Omarchy Kids system layer; they are not part of this plugin.
-
-## Host development
-
-Run the full checks, local inference benchmark, controlled headed proof, or persistent browser from the repository root:
+Remove the plugin with:
 
 ```bash
+omarchy plugin remove io.github.jaketothepast.adult-content-filter
+```
+
+No separate package install, root command, or download step is required. The launcher verifies the bundled files before every start, refuses to run as root, keeps the Chromium profile beneath a private `XDG_RUNTIME_DIR`, and permits one supervisor per user.
+
+## Filtering layers
+
+The managed browser applies these layers in order:
+
+1. A pinned adult-domain list rejects matching requests before navigation or media loading.
+2. Google searches are rewritten to force SafeSearch, and YouTube requests receive the strict restricted-mode header.
+3. A document-start cover prevents unreviewed page imagery from flashing onscreen.
+4. Successful static JPEG and PNG responses are inspected locally with the pinned NudeNet ONNX model. Explicit detections are replaced; decode, model, timeout, and policy failures are also replaced.
+5. If a blocked image is connected to a media control, that media element is tainted and prevented from playing. Unrelated video on the same page is not automatically blocked.
+
+The browser also denies downloads and DevTools, uses a fresh managed profile, accepts only complete HTTP(S) top-level navigations, and fails closed when intercepted content cannot be safely settled.
+
+Inference runs locally. Telemetry is written only to the launching terminal as bounded JSON records containing stage, verdict, fixture index, and elapsed time; URLs and image bytes are not logged.
+
+## Security boundary
+
+This plugin provides browser-only protection. It does not install a system service, autostart entry, MIME association, default-browser handler, user account, sudo rule, or machine-wide Chromium policy. It does not prevent a user from launching another browser or modifying the machine when that user already has administrative access.
+
+It is therefore an adult-content filtering browser, not a child account or anti-tamper system. Pair it later with a separately reviewed restricted-user policy if the machine must prevent bypass. The classifier, domain list, and browser interception are defense-in-depth controls rather than a promise that every adult page or adversarial rendering will be detected.
+
+Current image inference covers ordinary static JPEG and PNG responses. Canvas, WebGL, CSS background images, encrypted media streams, audio-only content, and hostile browser/OS modification remain outside the demonstrated boundary.
+
+## Bundled identities
+
+- ONNX Runtime 1.27.1 shared library
+- NudeNet `320n.onnx` SHA-256 `c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f`
+- StevenBlack `porn-only` hosts data from commit `2bb49d741a2c9b922b0ed59be6c28ce543bed81b`
+
+The launcher verifies `runtime/SHA256SUMS` before starting. Licensing and exact upstream identities are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Develop and verify
+
+The Nix flake pins the host toolchain and all development inputs:
+
+```bash
+nix run .#check
 nix flake check
+```
+
+Useful controlled proofs:
+
+```bash
 nix run .#bench -- --iterations 20 --warmups 3 --json
 nix run .#run -- --images 17 --flagged-index 5 --hold-millis 1500 --assert-no-flash --json
 nix run .#browse
 ```
 
-The controlled fixture contains only generated color images. It deterministically exercises one replacement without storing or downloading explicit imagery. JSON summaries contain runtime/model identity and aggregate counters; per-stage JSONL contains only `stage`, `verdict`, `fixture_index`, and `elapsed_micros`.
+The headed proof uses generated color fixtures, so validation never needs to store or download explicit material. It verifies request interception, one deterministic replacement, document covering, media association, privacy-safe metrics, browser cleanup, and model/runtime identity.
 
-## Build and validate in Omarchy
-
-The product-named wrappers use the reviewed local Omarchy, ISO, package, and filter checkouts:
+The runtime bundle is reproduced from the reviewed Arch recipe:
 
 ```bash
-nix run .#adult-filter-iso-build
-nix run .#adult-filter-iso-test -- /absolute/path/to/omarchy-adult-filter.iso --reuse-base --no-preview
+OMARCHY_LOCAL_PACKAGE_SRC="$PWD" makepkg -Csf --noconfirm -p packaging/arch/PKGBUILD
+scripts/build-plugin-bundle /absolute/path/to/omarchy-adult-content-filter-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
-The installed acceptance proof checks exact package contents, ownership, permissions, model and policy identities, managed-browser launch flags, the headed controlled fixture, privacy-safe telemetry, profile cleanup, and process cleanup.
+See [docs/experiment-results.md](docs/experiment-results.md) for measured host and controlled-VM evidence. Internal Rust identifiers retain their original `omarchy-kids` names for source compatibility; the public plugin ID and command are `io.github.jaketothepast.adult-content-filter` and `omarchy-adult-content-filter`.
 
-## Scope limits
+## License
 
-This is a filtering prototype, not a guarantee that every adult page or adversarial rendering will be detected. The model path currently covers ordinary static JPEG/PNG image responses; canvas, WebGL, CSS background images, encrypted media streams, audio, extensions outside the packaged surface, and hostile browser/OS modification remain outside the demonstrated boundary. The pinned model and domain list also require a separate redistribution review before public release.
-
-Measured benchmark, host-browser, and controlled ISO results are recorded in [docs/experiment-results.md](docs/experiment-results.md). Internal Rust and environment-variable names retain `omarchy-kids` compatibility until a later code-only migration; the installed product surface is `omarchy-adult-content-filter`.
+Original project code is licensed under `AGPL-3.0-only`. Bundled third-party components retain their own licenses and notices.

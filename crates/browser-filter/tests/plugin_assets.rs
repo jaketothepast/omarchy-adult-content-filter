@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, process::Command};
 
 fn workspace_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -88,4 +88,78 @@ fn qml_lifecycle_is_bound_to_the_tested_state_model() {
     assert!(service.contains("RuntimeModel.requestLaunch(supervisorProcess.running)"));
     assert!(service.contains("RuntimeModel.requestStop(supervisorProcess.running)"));
     assert!(service.contains("RuntimeModel.finishSupervisor(exitCode, root.stopping)"));
+}
+
+#[test]
+fn marketplace_surface_documents_one_clone_install_and_honest_scope() {
+    let readme = read("README.md");
+
+    for required in [
+        "omarchy plugin add https://github.com/jaketothepast/omarchy-adult-content-filter",
+        "omarchy plugin enable io.github.jaketothepast.adult-content-filter",
+        "omarchy plugin remove io.github.jaketothepast.adult-content-filter",
+        "Everything except Chromium is bundled in this plugin repository",
+        "browser-only protection",
+        "does not prevent a user from launching another browser",
+        "does not install a system service",
+    ] {
+        assert!(readme.contains(required), "README missing {required:?}");
+    }
+
+    for forbidden in [
+        "separate redistribution review before public release",
+        "private evaluation",
+        "non-redistributable",
+    ] {
+        assert!(
+            !readme.contains(forbidden),
+            "README contains stale release boundary {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn marketplace_root_contains_public_license_notices_and_preview() {
+    let license = read("LICENSE");
+    let notices = read("THIRD_PARTY_NOTICES.md");
+    assert!(license.contains("GNU AFFERO GENERAL PUBLIC LICENSE"));
+    for required in [
+        "ONNX Runtime 1.27.1",
+        "StevenBlack/hosts",
+        "NudeNet",
+        "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f",
+    ] {
+        assert!(notices.contains(required), "notices missing {required:?}");
+    }
+
+    let preview = fs::read(workspace_path("preview.png")).expect("preview.png must exist");
+    assert!(preview.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(
+        preview.len() <= 2 * 1024 * 1024,
+        "preview must stay marketplace-sized"
+    );
+}
+
+#[test]
+fn marketplace_plugin_tree_has_no_tracked_symlinks() {
+    let output = Command::new("git")
+        .args(["ls-files", "-s", "-z"])
+        .current_dir(workspace_path("."))
+        .output()
+        .expect("git ls-files must run");
+    assert!(output.status.success());
+
+    let entries = String::from_utf8(output.stdout).expect("git index output must be UTF-8");
+    let symlinks: Vec<&str> = entries
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\t').map(|(_, path)| path))
+        .filter(|path| {
+            fs::symlink_metadata(workspace_path(path))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        })
+        .collect();
+    assert!(
+        symlinks.is_empty(),
+        "the Omarchy marketplace rejects plugin-folder symlinks: {symlinks:?}"
+    );
 }

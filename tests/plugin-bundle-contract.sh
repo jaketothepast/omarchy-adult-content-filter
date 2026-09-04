@@ -119,8 +119,6 @@ runtime="$fixture/plugin/runtime"
 expected_paths=$(cat <<'EOF'
 SHA256SUMS
 bin/omarchy-adult-content-filter
-lib/onnxruntime/libonnxruntime.so
-lib/onnxruntime/libonnxruntime.so.1
 lib/onnxruntime/libonnxruntime.so.1.27.1
 share/browser-extension/cover.css
 share/browser-extension/manifest.json
@@ -142,8 +140,7 @@ actual_paths=$(find "$runtime" \( -type f -o -type l \) -printf '%P\n' | sort)
 }
 [[ -x $runtime/bin/omarchy-adult-content-filter ]] || fail "supervisor remains executable"
 [[ -x $runtime/lib/onnxruntime/libonnxruntime.so.1.27.1 ]] || fail "ONNX Runtime remains executable"
-[[ $(readlink "$runtime/lib/onnxruntime/libonnxruntime.so.1") == libonnxruntime.so.1.27.1 ]] || fail "ONNX ABI link is exact"
-[[ $(readlink "$runtime/lib/onnxruntime/libonnxruntime.so") == libonnxruntime.so.1 ]] || fail "ONNX linker link is exact"
+[[ -z $(find "$runtime" -type l -print -quit) ]] || fail "marketplace runtime contains no symlinks"
 (
   cd "$runtime"
   sha256sum --check --strict --quiet SHA256SUMS

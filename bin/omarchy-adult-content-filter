@@ -35,8 +35,7 @@ runtime_dir="$plugin_root/runtime"
 }
 
 readonly supervisor="$runtime_dir/bin/omarchy-adult-content-filter"
-readonly onnxruntime="$runtime_dir/lib/onnxruntime/libonnxruntime.so.1"
-readonly onnxruntime_versioned="$runtime_dir/lib/onnxruntime/libonnxruntime.so.1.27.1"
+readonly onnxruntime="$runtime_dir/lib/onnxruntime/libonnxruntime.so.1.27.1"
 readonly model="$runtime_dir/share/models/320n.onnx"
 readonly blocklist="$runtime_dir/share/policies/adult-domains.hosts"
 readonly extension="$runtime_dir/share/browser-extension"
@@ -44,7 +43,7 @@ readonly checksums="$runtime_dir/SHA256SUMS"
 
 for regular_file in \
   "$supervisor" \
-  "$onnxruntime_versioned" \
+  "$onnxruntime" \
   "$model" \
   "$blocklist" \
   "$extension/manifest.json" \
@@ -55,17 +54,8 @@ for regular_file in \
     exit 78
   }
 done
-[[ -x $supervisor && -x $onnxruntime_versioned ]] || {
+[[ -x $supervisor && -x $onnxruntime ]] || {
   printf 'bundled native runtime is not executable\n' >&2
-  exit 78
-}
-[[ -L $onnxruntime && $(/usr/bin/readlink -- "$onnxruntime") == "libonnxruntime.so.1.27.1" ]] || {
-  printf 'bundled ONNX Runtime ABI link is invalid\n' >&2
-  exit 78
-}
-[[ -L $runtime_dir/lib/onnxruntime/libonnxruntime.so \
-  && $(/usr/bin/readlink -- "$runtime_dir/lib/onnxruntime/libonnxruntime.so") == "libonnxruntime.so.1" ]] || {
-  printf 'bundled ONNX Runtime linker name is invalid\n' >&2
   exit 78
 }
 (
