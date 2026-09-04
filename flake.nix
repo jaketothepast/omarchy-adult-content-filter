@@ -61,7 +61,10 @@
           pkgs.clippy
           pkgs.git
           pkgs.jq
+          pkgs.nodejs
+          pkgs.ripgrep
           pkgs.rustfmt
+          pkgs.util-linux
         ];
         text = ''
           export ORT_DYLIB_PATH=${environment.ORT_DYLIB_PATH}
@@ -70,6 +73,8 @@
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
+          node plugin/tests/runtime-model-test.js
+          bash tests/plugin-runtime-contract.sh
         '';
       };
     in

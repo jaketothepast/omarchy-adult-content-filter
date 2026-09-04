@@ -1,0 +1,126 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly PATH=/usr/bin
+export PATH
+umask 077
+
+[[ $# -eq 0 ]] || {
+  printf 'omarchy-adult-content-filter accepts no arguments\n' >&2
+  exit 64
+}
+(( EUID != 0 )) || {
+  printf 'omarchy-adult-content-filter must not run as root\n' >&2
+  exit 77
+}
+
+script_path=${BASH_SOURCE[0]}
+[[ ! -L $script_path ]] || {
+  printf 'plugin launcher must not be a symbolic link\n' >&2
+  exit 78
+}
+script_dir=${script_path%/*}
+[[ $script_dir != "$script_path" ]] || script_dir=.
+plugin_root=$(cd -P -- "$script_dir/.." && pwd -P)
+runtime_dir="$plugin_root/runtime"
+
+[[ -d $runtime_dir && ! -L $runtime_dir ]] || {
+  printf 'bundled runtime directory is missing or unsafe\n' >&2
+  exit 78
+}
+[[ $(/usr/bin/readlink -f -- "$runtime_dir") == "$runtime_dir" ]] || {
+  printf 'bundled runtime directory is not canonical\n' >&2
+  exit 78
+}
+
+readonly supervisor="$runtime_dir/bin/omarchy-adult-content-filter"
+readonly onnxruntime="$runtime_dir/lib/onnxruntime/libonnxruntime.so.1"
+readonly onnxruntime_versioned="$runtime_dir/lib/onnxruntime/libonnxruntime.so.1.27.1"
+readonly model="$runtime_dir/share/models/320n.onnx"
+readonly blocklist="$runtime_dir/share/policies/adult-domains.hosts"
+readonly extension="$runtime_dir/share/browser-extension"
+readonly checksums="$runtime_dir/SHA256SUMS"
+
+for regular_file in \
+  "$supervisor" \
+  "$onnxruntime_versioned" \
+  "$model" \
+  "$blocklist" \
+  "$extension/manifest.json" \
+  "$extension/cover.css" \
+  "$checksums"; do
+  [[ -f $regular_file && ! -L $regular_file ]] || {
+    printf 'bundled runtime file is missing or unsafe: %s\n' "$regular_file" >&2
+    exit 78
+  }
+done
+[[ -x $supervisor && -x $onnxruntime_versioned ]] || {
+  printf 'bundled native runtime is not executable\n' >&2
+  exit 78
+}
+[[ -L $onnxruntime && $(/usr/bin/readlink -- "$onnxruntime") == "libonnxruntime.so.1.27.1" ]] || {
+  printf 'bundled ONNX Runtime ABI link is invalid\n' >&2
+  exit 78
+}
+[[ -L $runtime_dir/lib/onnxruntime/libonnxruntime.so \
+  && $(/usr/bin/readlink -- "$runtime_dir/lib/onnxruntime/libonnxruntime.so") == "libonnxruntime.so.1" ]] || {
+  printf 'bundled ONNX Runtime linker name is invalid\n' >&2
+  exit 78
+}
+(
+  cd -- "$runtime_dir"
+  /usr/bin/sha256sum --check --strict --quiet SHA256SUMS
+) || {
+  printf 'bundled runtime checksum verification failed\n' >&2
+  exit 78
+}
+
+[[ -x /usr/bin/chromium && ! -L /usr/bin/chromium ]] || {
+  printf 'system Chromium is missing or unsafe\n' >&2
+  exit 69
+}
+
+readonly xdg_runtime=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}
+[[ $xdg_runtime == /* && -d $xdg_runtime && ! -L $xdg_runtime ]] || {
+  printf 'XDG_RUNTIME_DIR is not a safe directory\n' >&2
+  exit 78
+}
+[[ $(/usr/bin/readlink -f -- "$xdg_runtime") == "$xdg_runtime" ]] || {
+  printf 'XDG_RUNTIME_DIR is not canonical\n' >&2
+  exit 78
+}
+runtime_metadata=$(/usr/bin/stat -c '%u %a' -- "$xdg_runtime")
+[[ $runtime_metadata == "$EUID 700" ]] || {
+  printf 'XDG_RUNTIME_DIR has unsafe ownership or mode\n' >&2
+  exit 78
+}
+
+readonly runtime_root="$xdg_runtime/omarchy-adult-content-filter"
+/usr/bin/install -d -m 0700 -- "$runtime_root"
+[[ -d $runtime_root && ! -L $runtime_root ]] || {
+  printf 'managed browser runtime directory is unsafe\n' >&2
+  exit 78
+}
+runtime_metadata=$(/usr/bin/stat -c '%u %a' -- "$runtime_root")
+[[ $runtime_metadata == "$EUID 700" ]] || {
+  printf 'managed browser runtime directory has unsafe ownership or mode\n' >&2
+  exit 78
+}
+
+exec 9>"$runtime_root/instance.lock"
+if ! /usr/bin/flock -n 9; then
+  printf 'managed browser is already running\n' >&2
+  exit 75
+fi
+
+export HOME="$runtime_root"
+export TMPDIR="$runtime_root"
+export OMARCHY_KIDS_PROFILE_ROOT="$runtime_root"
+export CHROMIUM_BIN=/usr/bin/chromium
+export ORT_DYLIB_PATH="$onnxruntime"
+export NUDENET_MODEL_PATH="$model"
+export OMARCHY_KIDS_EXTENSION_DIR="$extension"
+export OMARCHY_KIDS_BLOCKLIST_PATH="$blocklist"
+
+exec "$supervisor" browse --json
