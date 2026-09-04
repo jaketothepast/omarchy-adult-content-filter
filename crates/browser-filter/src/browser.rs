@@ -251,20 +251,28 @@ impl InferenceWorker {
     }
 }
 
-struct HeadedDetectorSession {
+pub(crate) struct HeadedDetectorSession {
     metadata: DetectorMetadata,
     worker: InferenceWorker,
 }
 
 impl HeadedDetectorSession {
-    fn start(detector: Detector) -> Self {
+    pub(crate) fn start(detector: Detector) -> Self {
         let metadata = detector.metadata().clone();
         let worker = InferenceWorker::start(detector);
         Self { metadata, worker }
     }
 
-    async fn detect(&self, encoded: Vec<u8>, deadline: Duration) -> Result<InferenceReport> {
+    pub(crate) async fn detect(
+        &self,
+        encoded: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<InferenceReport> {
         self.worker.detect(encoded, deadline).await
+    }
+
+    pub(crate) fn metadata(&self) -> &DetectorMetadata {
+        &self.metadata
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -288,7 +296,7 @@ impl HeadedDetectorSession {
         )
     }
 
-    async fn shutdown(self, deadline: Duration) -> Result<()> {
+    pub(crate) async fn shutdown(self, deadline: Duration) -> Result<()> {
         self.worker.shutdown(deadline).await
     }
 }
@@ -433,7 +441,7 @@ async fn run_with_browser(
     }
 }
 
-async fn cleanup_browser(
+pub(crate) async fn cleanup_browser(
     browser: &mut Browser,
     mut handler_task: tokio::task::JoinHandle<Result<()>>,
     deadline: Duration,
@@ -503,7 +511,7 @@ impl CleanupOperations for BrowserCleanupOperations<'_> {
 }
 
 #[derive(Debug, Default)]
-struct CleanupReport {
+pub(crate) struct CleanupReport {
     errors: Vec<String>,
     forced_reap: bool,
 }
@@ -518,7 +526,7 @@ impl CleanupReport {
         self.forced_reap
     }
 
-    fn into_result(self) -> Result<()> {
+    pub(crate) fn into_result(self) -> Result<()> {
         if self.is_clean() {
             Ok(())
         } else {
@@ -1208,7 +1216,7 @@ fn replacement_headers() -> Vec<HeaderEntry> {
     ]
 }
 
-fn fetch_enable_params() -> EnableParams {
+pub(crate) fn fetch_enable_params() -> EnableParams {
     EnableParams::builder()
         .pattern(
             RequestPattern::builder()
@@ -1219,11 +1227,11 @@ fn fetch_enable_params() -> EnableParams {
         .build()
 }
 
-fn continue_response(request_id: RequestId) -> ContinueResponseParams {
+pub(crate) fn continue_response(request_id: RequestId) -> ContinueResponseParams {
     ContinueResponseParams::new(request_id)
 }
 
-fn replacement_response(request_id: RequestId) -> FulfillRequestParams {
+pub(crate) fn replacement_response(request_id: RequestId) -> FulfillRequestParams {
     FulfillRequestParams::builder()
         .request_id(request_id)
         .response_code(200)
@@ -1337,7 +1345,11 @@ fn response_requires_body(response_status_code: Option<i64>, has_response_error:
     response_status_code == Some(200) && !has_response_error
 }
 
-fn decode_response_body(body: &str, base64_encoded: bool, max_bytes: usize) -> Result<Vec<u8>> {
+pub(crate) fn decode_response_body(
+    body: &str,
+    base64_encoded: bool,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
     if base64_encoded {
         let padding = body
             .as_bytes()
