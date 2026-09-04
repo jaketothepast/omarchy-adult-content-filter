@@ -169,9 +169,9 @@ The binary keeps `doctor` only as an explicitly reserved, unimplemented CLI plac
 
 The future ISO build app will validate the sibling checkouts and invoke `../omarchy-iso/bin/omarchy-iso-make --keep-pkg-cache --no-boot-offer --local-source ../omarchy ../omarchy-pkgs`. The privileged build continues inside the existing Arch Linux Docker container and `mkarchiso`; Nix will supply the host tools and the stable command surface.
 
-The current ISO harness assumes Arch-host OVMF paths and unconditionally manages host packages through `omarchy-pkg-add`. Our sibling ISO fork receives two small, general adaptations instead of duplicating it: `OMARCHY_VM_OVMF_CODE`/`OMARCHY_VM_OVMF_VARS_TEMPLATE` overrides with the current Arch paths as defaults, and `OMARCHY_ISO_MANAGE_HOST_DEPS=0` to skip package installation while still validating every required executable and firmware file. Nix points those overrides at `OVMF.fd` in its store.
+The current ISO harness assumes Arch-host OVMF paths and unconditionally manages host packages through `omarchy-pkg-add`. Our sibling ISO clone receives two small, general adaptations on a local-only branch instead of duplicating it: `OMARCHY_VM_OVMF_CODE`/`OMARCHY_VM_OVMF_VARS_TEMPLATE` overrides with the current Arch paths as defaults, and `OMARCHY_ISO_MANAGE_HOST_DEPS=0` to skip package installation while still validating every required executable and firmware file. Nix points those overrides at `OVMF.fd` in its store.
 
-The ISO builder's local-source mode currently builds only `omarchy-dev`, `omarchy-settings-dev`, and `omarchy-nvim`, and its sync option knows only the main Omarchy tree. The first ISO command therefore proves the baseline toolchain only. After the host pipeline passes, the ISO and package forks gain a generic local-extra-package input and generic guest artifact sync hook; they do not gain a Kids-specific flag.
+The ISO builder's local-source mode currently builds only `omarchy-dev`, `omarchy-settings-dev`, and `omarchy-nvim`, and its sync option knows only the main Omarchy tree. The first ISO command therefore proves the baseline toolchain only. After the host pipeline passes, the ISO and package clones gain a generic local-extra-package input and generic guest artifact sync hook on local-only branches; they do not gain a Kids-specific flag.
 
 The flake lock pins developer inputs. Cargo's lock file pins Rust dependencies. Model downloads use a fixed content hash. The headed-run summary reports the Chromium version that actually executed; this identity is not part of the per-image `MetricRecord` schema.
 
@@ -200,7 +200,9 @@ The flake lock pins developer inputs. Cargo's lock file pins Rust dependencies. 
 
 ### ISO tests
 
-ISO work begins only after the host pipeline passes. The Rust binary, extension, model-fetch/package metadata, service, and policies are packaged into a local-source ISO. The existing Omarchy ISO harness installs that ISO into a VM. A new acceptance scenario runs the local fixture, verifies service health and managed policy, captures the covered and revealed states, and asserts the deterministic flagged response is absent from the rendered result.
+ISO work begins only after the host pipeline passes. The Rust binary, extension, pinned runtime/model inputs, local-only package metadata, and a clearly labeled controlled-demo launcher are packaged into a local-source ISO. The existing Omarchy ISO harness installs that ISO into a VM. A Kids-owned acceptance scenario runs the local fixture, verifies the installed artifacts, runtime identity, and exact model hash, validates covered and revealed pixels through the fixture runner's in-memory screenshots, preserves the derived JSON evidence, and asserts the deterministic flagged response is absent from the rendered result.
+
+The current `run` command is not a long-lived service and cannot navigate arbitrary sites: it owns a disposable profile, starts its own loopback fixture, and accepts no external URL. The first Kids ISO therefore does not install a background service, replace `chromium.desktop`, change Omarchy's default-browser routing, or apply a machine-wide Chromium policy. Those integrations require a later arbitrary-navigation supervisor and a policy design that cannot weaken or unexpectedly constrain the ordinary browser. The initial ISO result is a private, local controlled demonstrator only; it is not redistributable while the project and model licensing questions remain unresolved.
 
 ## Performance gates
 
