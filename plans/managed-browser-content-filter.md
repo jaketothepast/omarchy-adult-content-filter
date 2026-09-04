@@ -1,8 +1,8 @@
-# Plan: Managed-browser content filtering for Omarchy Kids
+# Plan: Adult-content filtering browser for Omarchy
 
 ## Problem
 
-Hostname filters are useful but cannot inspect the URL path or content of an HTTPS page. A separate pre-rendering proxy would need to reproduce the child's authenticated browser session, execute untrusted pages twice, and delay every navigation by roughly another page load. Omarchy Kids needs a local experiment that answers a narrower question first: can stock Chromium pause the exact image responses it will display, classify them locally in Rust, and substitute a safe response before the original pixels become visible?
+Hostname filters are useful but cannot inspect the URL path or content of an HTTPS page. A separate pre-rendering proxy would need to reproduce the browser's authenticated session, execute untrusted pages twice, and delay every navigation by roughly another page load. The Omarchy Adult Content Filter began as a Kids experiment answering a narrower question first: can stock Chromium pause the exact image responses it will display, classify them locally in Rust, and substitute a safe response before the original pixels become visible?
 
 This repository is an independent experiment and eventual product integration point. It layers onto an ordinary Omarchy checkout rather than forking Chromium or replacing Omarchy's installer. The work is intentionally structured so successful generic improvements can later become focused pull requests to Omarchy, Omarchy ISO, or their package repository.
 
@@ -202,7 +202,7 @@ The flake lock pins developer inputs. Cargo's lock file pins Rust dependencies. 
 
 ISO work begins only after the host pipeline passes. The Rust binary, extension, pinned runtime/model inputs, local-only package metadata, and a clearly labeled controlled-demo launcher are packaged into a local-source ISO. The existing Omarchy ISO harness installs that ISO into a VM. A Kids-owned acceptance scenario runs the local fixture, verifies the installed artifacts, runtime identity, and exact model hash, validates covered and revealed pixels through the fixture runner's in-memory screenshots, preserves the derived JSON evidence, and asserts the deterministic flagged response is absent from the rendered result.
 
-The current `run` command is not a long-lived service and cannot navigate arbitrary sites: it owns a disposable profile, starts its own loopback fixture, and accepts no external URL. The first Kids ISO therefore does not install a background service, replace `chromium.desktop`, change Omarchy's default-browser routing, or apply a machine-wide Chromium policy. Those integrations require a later arbitrary-navigation supervisor and a policy design that cannot weaken or unexpectedly constrain the ordinary browser. The initial ISO result is a private, local controlled demonstrator only; it is not redistributable while the project and model licensing questions remain unresolved.
+The original `run` command is not a long-lived service and cannot navigate arbitrary sites: it owns a disposable profile, starts its own loopback fixture, and accepts no external URL. The first Kids ISO therefore installed only that controlled demonstrator. The later `browse` supervisor and adult-filter package add persistent top-level HTTP(S) navigation while retaining a private disposable profile, but still do not install a background service, replace `chromium.desktop`, change Omarchy's default-browser routing, or apply a machine-wide Chromium policy. The package remains private and local while the project and model licensing questions are unresolved.
 
 ## Performance gates
 
@@ -226,7 +226,19 @@ The headed fixture intercepted 17 responses, continued 16, deterministically rep
 
 This establishes the response-interception, cover, replacement, and cleanup plumbing only. The deterministic flagged route is not a NudeNet accuracy test, and this result does not validate NudeNet accuracy, real-world pornography blocking, adversarial robustness, model suitability or licensing for distribution, video/canvas/CSS-background/`blob:`/service-worker paths, or ISO integration. The current metrics also do not isolate pause-to-fulfill overhead or measure peak memory, so those portions of the original performance gates remain unresolved. The verified model checksum/runtime execution and colored-pixel preprocessing tests do not establish semantic parity with the upstream Python reference; that gate remains explicitly unverified.
 
-## Final approved measured installed ISO result
+## Final installed adult-content-filter package result
+
+The browser is now packaged as the opt-in Omarchy application `omarchy-adult-content-filter`, backed by a private Arch package of the same name. It launches a dedicated disposable managed Chromium without replacing ordinary Chromium, registering a default browser, installing a service, or changing system policy. This is the intended browser-only plugin boundary; child-account and machine-lockdown enforcement are deferred.
+
+The final uniquely tagged ISO is `/home/jake/Projects/omarchy-iso/release/omarchy-2026.09.04-x86_64-adult-filter-final-20260904-174935-254772802.iso`, 6,209,560,576 bytes, SHA-256 `c3bb3149668e1e054c5942a342e12201cd4e1eacc753664f9566fdaddb2870d2`. It contains one matching `omarchy-adult-content-filter-0.1.0-1-x86_64.pkg.tar.zst` archive, 23,781,775 bytes, SHA-256 `8c6324c3b880af6d87a06cf4abaaaee48c2a0ac70001f4b82fe0515aebb93e2b`. The ISO was built from browser/package source `eb74d00`, package recipe `6ee53e6`, ISO workflow `29a66a2`, and Omarchy `fb39bcd3`; the later acceptance-only compatibility fix is `9d29329`.
+
+The graphical configurator completed all 14 install phases and produced a clean 40 GiB base with SHA-256 `28989d415d91bf1374ddd856c6ba3a7f569bee320a3dd19227233a854510b65c`. Final reuse-base acceptance run `20260904-143640` passed all desktop smoke checks, the normal Omarchy suite in 86 seconds with no failed system or user units, and the installed adult-filter suite. That suite proved the pinned private package inventory, native-Wayland Chromium with developer tools disabled and a disposable profile, one-tab enforcement, clean launcher shutdown, and complete process/profile/VM cleanup.
+
+The installed controlled fixture reported Chromium 152.0.7977.82, ONNX Runtime 1.27.1, the pinned model hash, 17 intercepted images, 16 continuations, one replacement, zero unresolved, and a 2 ms reveal. Three samples proved an opaque cover for an actual 1,501 ms before reveal. Exactly 34 privacy-safe metrics were collected. The managed-launch summary loaded all 76,767 pinned adult-domain entries and rejected an extra page. Host behavior tests cover the earlier domain, SafeSearch, and YouTube request layers plus fail-closed image inference and media blocking connected to a flagged thumbnail.
+
+This result establishes an installable browser plugin and its controlled filtering pipeline. It does not establish model accuracy on real adult content, adversarial resistance, complete coverage of every browser rendering/media path, redistribution clearance, or an OS policy that prevents launching other browsers. Exact evidence and hashes are recorded in [the experiment results](../docs/experiment-results.md).
+
+## Superseded measured installed Kids ISO result
 
 The private installed-ISO milestone passed its final post-review validation on 2026-09-04 without changing the ordinary Omarchy browser default or installing a background service or managed Chromium policy. The final uniquely tagged artifact was built from reviewed Kids `d2f0a2c`, generic ISO workflow `29a66a2`, Omarchy `fb39bcd`, and local package recipe `bb633d6`; the upstream baseline ISO and every earlier Kids artifact remained separate and byte-identical.
 

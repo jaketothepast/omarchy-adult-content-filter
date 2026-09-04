@@ -215,7 +215,30 @@ Behavioral RED/GREEN coverage was added for each generic fix: working-directory 
 
 One unrelated host-side Omarchy aggregate result remains recorded: `./test/all` reported 2 of 227 shell test files failing, `launch-about-test.sh` at `a roomy window animates` and `network-captive-portal-test.sh` because `quickshell` was unavailable in that host test environment. The focused OCR and bar state-machine regressions passed, and the final installed guest acceptance suite passed the corresponding runtime surfaces. These aggregate failures were not changed or concealed as part of the ISO baseline.
 
-## Final approved private installed Kids ISO validation
+## Final installed Omarchy Adult Content Filter validation
+
+On 2026-09-04, the renamed browser-only product was built as the private Arch package `omarchy-adult-content-filter`, included in a uniquely tagged Omarchy ISO, installed through the real graphical configurator, and exercised in a headed QEMU/KVM Omarchy session. The user-facing shape is an opt-in Omarchy application/plugin; the Arch package is its delivery mechanism. It installs no service, autostart entry, MIME association, default-browser override, global Chromium policy, account restriction, or sudo rule.
+
+The package bytes came from filter revision `eb74d00872166d5681d48bda5da6688eb310af4e`, package recipe `6ee53e61bfb3ef57ec66db328e9b3dc03eacb48b`, generic ISO workflow `29a66a248bf21079f479eccfe21067331d615079`, and Omarchy `fb39bcd3b92cd70eebcdaf31945b91260f2a0f94`. Installed acceptance used filter revision `9d2932970d2d8c9e05831dff7e07cb91b38adc80`, whose only post-build change makes the harness recognize Chromium's rewritten process title and use Hyprland 0.56's Lua window dispatcher. The package and ISO bytes were not rebuilt or altered by that harness-only compatibility fix.
+
+| Artifact | Size | Mode | SHA-256 |
+| --- | ---: | ---: | --- |
+| `/home/jake/Projects/omarchy-iso/release/omarchy-2026.09.04-x86_64-adult-filter-final-20260904-174935-254772802.iso` | 6,209,560,576 bytes | `0644` | `c3bb3149668e1e054c5942a342e12201cd4e1eacc753664f9566fdaddb2870d2` |
+| `/home/jake/Projects/omarchy-iso/release/local-packages/adult-filter-final-20260904-174935-254772802/omarchy-adult-content-filter-0.1.0-1-x86_64.pkg.tar.zst` | 23,781,775 bytes | `0644` | `8c6324c3b880af6d87a06cf4abaaaee48c2a0ac70001f4b82fe0515aebb93e2b` |
+| Installed 40 GiB `base.qcow2` | 6,485,835,776 bytes | `0644` | `28989d415d91bf1374ddd856c6ba3a7f569bee320a3dd19227233a854510b65c` |
+| Passing acceptance `run.qcow2` overlay | 148,111,360 bytes | `0644` | `bec7f0538d205f04258722f626d640e45221ec52a77898a6a087ab8d242d3c3a` |
+
+The ISO produced exactly one matching package archive. `pacman -Qip` identifies it as private-evaluation package `omarchy-adult-content-filter` version `0.1.0-1`; its 29-entry `pacman -Qlp` inventory contains the dedicated command and desktop entry, private Rust supervisor, exact two-file cover extension, pinned model and 76,767-entry adult-domain policy, private ONNX Runtime, and their notices. The real installer completed all 14 recorded phases, the second bounded SSH bootstrap attempt succeeded, and the installed-system pacman log records `omarchy-adult-content-filter (0.1.0-1)`. Install evidence is retained under run `20260904-135712`.
+
+The final reuse-base run `20260904-143640` passed all 26 desktop smoke checks and normal Omarchy acceptance in 86 seconds, including no failed system or user units. The external suite then observed the exact newly launched Chromium client and PID, verified `--disable-dev-tools`, native Wayland, and the private disposable profile, closed that addressed window through the current Hyprland dispatcher, and saw the launcher exit cleanly. The managed summary reported Chromium `152.0.7977.82`, ONNX Runtime `1.27.1`, the pinned model hash, 76,767 loaded blocklist entries, one rejected extra page, zero unresolved requests, and clean shutdown.
+
+The same installed binary's harmless controlled fixture independently reported 17 intercepted images, 16 continued, one replaced, zero unresolved, and 2 ms reveal latency. Its requested 1,500 ms cover lasted 1,501 ms across three samples totaling 1,413,000 opaque `[17, 19, 24, 255]` pixels. After reveal, all 16 safe colors and the magenta placeholder were present while the original flagged color was absent. The metric file contained exactly 34 objects with only `elapsed_micros`, `fixture_index`, `stage`, and `verdict`: 17 inference, 17 policy, 32 allow, and two replace records. Both base and overlay passed non-repairing `qemu-img check`; the ISO, package, and base hashes remained unchanged; no disposable profile, filter-launched Chromium, QEMU process, or ports 2222/5905 remained.
+
+Host tests separately exercise the layered request policy: pre-network adult-domain denial, Google SafeSearch rewriting, strict YouTube restriction headers, response-stage JPEG/PNG inference with fail-closed replacement, and blocking only media controls and video elements connected to a flagged image. The installed harmless fixture proves packaging, execution, cover, image substitution, and cleanup, but it does not claim pornography-classifier accuracy or exercise live adult sites. This browser-only plugin also does not stop an administrator or ordinary user from launching a different browser; account and OS enforcement remain deliberately outside this deliverable.
+
+All artifacts and commits remain local. No push, fetch, fork, pull request, remote mutation, upload, or evidence deletion was performed.
+
+## Superseded private installed Kids ISO validation
 
 On 2026-09-04, the reviewed post-fix source heads produced a fresh private Kids package, a fresh uniquely tagged ISO, a fresh installed-system base, and a canonical normal-plus-external acceptance run. This is the final approved controlled-demo artifact. The first successful installed artifact remains documented in the next section as superseded-but-successful evidence; it was not deleted, renamed, or overwritten.
 
@@ -380,11 +403,11 @@ The smoke also surfaced and fixed two fail-safe orchestration defects before han
 - NudeNet accuracy, false-positive rate, recall, and threshold calibration were not evaluated. No real-world explicit-content corpus was used.
 - Real-world pornography blocking and adversarial robustness were not tested. A hostile page can use content types, rendering paths, timing, or cover manipulation outside this controlled fixture.
 - The NudeNet model's suitability, training-data provenance, and license for product distribution remain unresolved; upstream metadata conflicts and the weights lack sufficiently clear separate terms.
-- Video, canvas, WebGL, CSS background images, `data:` URLs, `blob:` URLs, service-worker-controlled responses, browser cache variants, back/forward cache, and dynamically loaded content are outside this proof.
+- Direct video-stream classification, canvas, WebGL, CSS background images, `data:` URLs, `blob:` URLs, service-worker-controlled responses, browser cache variants, back/forward cache, and many dynamically rendered paths are outside this proof. Host tests do prove that replacing a flagged image disables video and media controls connected to that image without blocking unrelated video.
 - Only the supervised Chromium process is covered. Other browsers, native applications, Chromium-internal pages, and unsupervised network paths are not filtered.
 - The page cover is a pipeline-spike mechanism and is not tamper-resistant against hostile page script.
 - The experiment uses an ephemeral loopback DevTools endpoint. Production would need a private inherited pipe or equivalently confined control channel.
 - The benchmark uses a small repeating synthetic corpus and does not establish accuracy, content diversity, peak memory, long-run stability, or minimum supported hardware.
-- The upstream baseline, private Kids package/install/controlled-fixture paths, and one persistent loopback-navigation smoke are proven on this machine, but real-world arbitrary-site validation, filter-service startup, default-browser integration, and bypass-resistant enforcement remain unperformed.
+- The upstream baseline, private Kids controlled fixture, renamed adult-filter package/install path, and persistent loopback-navigation smoke are proven on this machine, but real-world arbitrary-site safety validation, filter-service startup, default-browser integration, and bypass-resistant enforcement remain unperformed.
 
 The next milestone may treat the controlled interception architecture as demonstrated, but production work must not treat this result as a pornography-classification validation or deployment approval.
