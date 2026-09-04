@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf};
 
 fn workspace_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -171,22 +171,30 @@ fn marketplace_root_contains_public_license_notices_and_preview() {
 
 #[test]
 fn marketplace_plugin_tree_has_no_tracked_symlinks() {
-    let output = Command::new("git")
-        .args(["ls-files", "-s", "-z"])
-        .current_dir(workspace_path("."))
-        .output()
-        .expect("git ls-files must run");
-    assert!(output.status.success());
+    fn collect_symlinks(directory: &std::path::Path, symlinks: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory).expect("plugin directory must be readable") {
+            let entry = entry.expect("plugin entry must be readable");
+            let path = entry.path();
+            let name = entry.file_name();
+            if [".git", ".superpowers", ".worktrees", "target", "result"]
+                .iter()
+                .any(|ignored| name == *ignored)
+            {
+                continue;
+            }
+            let file_type = entry
+                .file_type()
+                .expect("plugin entry type must be readable");
+            if file_type.is_symlink() {
+                symlinks.push(path);
+            } else if file_type.is_dir() {
+                collect_symlinks(&path, symlinks);
+            }
+        }
+    }
 
-    let entries = String::from_utf8(output.stdout).expect("git index output must be UTF-8");
-    let symlinks: Vec<&str> = entries
-        .split('\0')
-        .filter_map(|entry| entry.split_once('\t').map(|(_, path)| path))
-        .filter(|path| {
-            fs::symlink_metadata(workspace_path(path))
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        })
-        .collect();
+    let mut symlinks = Vec::new();
+    collect_symlinks(&workspace_path("."), &mut symlinks);
     assert!(
         symlinks.is_empty(),
         "the Omarchy marketplace rejects plugin-folder symlinks: {symlinks:?}"
