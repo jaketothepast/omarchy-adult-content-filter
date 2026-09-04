@@ -137,6 +137,84 @@ The DOM inspection also reported all 17 images at their expected 1×1 natural si
 
 These results are machine-specific experiment measurements, not latency guarantees for other Omarchy hardware.
 
+## Baseline local-source ISO validation
+
+On 2026-09-04, the Nix-supplied sibling workflow built a local Omarchy ISO, installed it through the real graphical configurator in QEMU/KVM, and passed the complete shortcut and in-guest acceptance smoke against a reusable installed-system base. This is an upstream Omarchy baseline only. It does not contain the Omarchy Kids browser-filter package, managed Chromium policy, filter service, or Kids-specific acceptance test.
+
+The ISO contains the local Omarchy compatibility branch through `5df95727`, including the generic Broadcom package-name correction and bar probe fixes discovered during validation. The builder and host harness likewise contain local generic fixes listed below. No Kids filtering code was copied into the ISO.
+
+### Exact source identities
+
+| Checkout | Branch | Revision used for the final artifact or validation |
+| --- | --- | --- |
+| Omarchy Kids wrapper | `managed-browser-filter` | `42ac5f56fb40907e5bde1aa03fc026d6cd42b417` |
+| Omarchy source packaged in the ISO | `omarchy-kids-iso-compat` | `5df95727eaaa072087cbe63d81eb2789ee5f0eec` |
+| Omarchy ISO builder used for the final build | `omarchy-kids-local-workflow` | `769199619c87972258bb9513498b5b08013a7041` |
+| Omarchy ISO harness used for the final acceptance pass | `omarchy-kids-local-workflow` | `06a3718b16f70514eca87cd8c2e1bf74bd79e369` |
+| Omarchy ISO integration parity fix verified afterward | `omarchy-kids-local-workflow` | `55e47941d6d4b30eb35b32f5806c70f6110dea2f` |
+| Omarchy packages | `master` | `18f11555b690ff5dd8a1b7b4371adfce9963ffa2` |
+| ArchISO submodule | detached | `424e78130db2af6c1ceb55b442d7914b1109ff2b` |
+
+The final build log records `omarchy-dev-4.0.0.r2018.g5df9572-1-any.pkg.tar.zst`, independently tying the packaged Omarchy source to the revision above. All repositories were clean after their local commits. None of these local branches or commits was pushed.
+
+### Exact successful commands
+
+Each command was run from this linked Kids worktree after unsetting `OMARCHY_PATH`, `OMARCHY_ISO_PATH`, and `OMARCHY_PKGS_PATH`, so the checked sibling defaults were exercised rather than the installed Omarchy snapshot in the interactive shell.
+
+```bash
+nix run .#doctor
+nix run .#iso-unit
+nix run .#iso-build
+nix run .#iso-test -- /home/jake/Projects/omarchy-iso/release/omarchy-2026.09.04-x86_64-local.iso --install-only --no-preview
+nix run .#iso-test -- /home/jake/Projects/omarchy-iso/release/omarchy-2026.09.04-x86_64-local.iso --reuse-base --sync-omarchy /home/jake/Projects/omarchy --no-preview
+```
+
+All five final commands exited `0`. Doctor passed all 13 real host checks. The VM-free ISO suite passed every shell case and all 63 Python tests. The final build took 270 seconds, the final install-only run took 476 seconds, and the post-fix reuse-base acceptance pass took 155.310 seconds. The in-guest acceptance portion itself reported 85 seconds.
+
+### Artifact identity
+
+| Artifact | Size | SHA-256 |
+| --- | ---: | --- |
+| `/home/jake/Projects/omarchy-iso/release/omarchy-2026.09.04-x86_64-local.iso` | 6,191,368,192 bytes | `3a5dd741741ed2f01dd84b3509618c781bce2998463b118bb064bc22b7fc9cc9` |
+| `/home/jake/Projects/omarchy-iso/test-runs/omarchy-2026.09.04-x86_64-local/base.qcow2` | 6,360,268,800 bytes | `c7d20e572264adf71abc7b3c8c81b81a4e9b180dc77c013940c20a0744ccc77a` |
+| `/home/jake/Projects/omarchy-iso/test-runs/omarchy-2026.09.04-x86_64-local/OVMF_VARS.4m.fd` | 540,672 bytes | `f175d0dcd5ce7c9765b8cfcf0200002b97e2359b4c3cbf1aaab7a739911dc4f5` |
+
+The ISO is the single final `*-local.iso`; two superseded images were retained rather than deleted: `omarchy-2026.09.04-x86_64-local-before-bar-reprobe.iso.preserved` (6,191,368,192 bytes, SHA-256 `29ec38e317460faec85a23f8ce6f517dce05ba140a8e97e9019de61689263726`) and `omarchy-2026.09.04-x86_64-local-attempt-8-bar-reprobe.iso.preserved` (6,191,368,192 bytes, SHA-256 `811b732436451e27d293a12279449d81deb3f8fa44d2c330cc3b7d0d06903f60`). A fresh non-repairing `qemu-img check` found no errors in the final base.
+
+The final install artifacts are under `/home/jake/Projects/omarchy-iso/test-runs/omarchy-2026.09.04-x86_64-local/runs/20260903-231936`. The canonical passing acceptance artifacts, including 49 screenshots and the collected guest logs, are under `/home/jake/Projects/omarchy-iso/test-runs/omarchy-2026.09.04-x86_64-local/runs/20260904-000715`. Command logs, timings, controlled-boot evidence, extracted UKI, Limine configuration, Plymouth units, and read-only journal evidence are preserved under `.superpowers/sdd/2026-09-03-nix-iso-workflow-implementation/task-5-artifacts/`.
+
+### Attempt history and defects found
+
+No failed command was relabeled as a pass, and no assertion was weakened.
+
+| Stage | Attempt | Wall time | Exit | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Build | 1 | 24.515s | 1 | Pacman rejected a stale host-cached `omarchy-keyring` archive. |
+| Build | 2 | 15.511s | 1 | Invocation from the Kids worktree ran ISO-relative submodule setup in the wrong directory, leaving the ArchISO releng profile unavailable. |
+| Build | 3 | 26.102s | 1 | An inherited `OMARCHY_PATH` selected an older installed snapshot that lacked the current settings file. The clean measurement shell now exercises default sibling resolution without changing override precedence. |
+| Build | 4 | 95.760s | 1 | Current edge repositories no longer provided `broadcom-wl`; both the offline inventory and hardware installer were corrected to the supported `broadcom-wl-dkms` package. |
+| Build | 5 | 242.668s | 1 | Pacman rejected a stale host-cached `tzupdate` archive. |
+| Build | 6 | about 178s | 1 | A rebuilt local `omarchy-settings-dev` archive collided with same-version bytes in the persistent host Pacman cache. The captured timer line was malformed, so no false precision is claimed. Local-source builds now keep an invocation-local package cache while retaining the channel-scoped offline mirror. |
+| Build | 7 | 273.09s | 0 | First complete ISO build; retained as the pre-bar artifact and superseded after acceptance exposed generic Omarchy issues. |
+| Build | 8 | 280s | 0 | Rebuilt after the first bar replay fix; retained and superseded after review required behavioral state-machine coverage. |
+| Build | 9 | 270s | 0 | Final ISO, packaged from Omarchy `5df95727`. |
+| Install | 1 | 1.75s | 1 | QEMU could not write the Nix-store-derived OVMF vars copy because plain copying preserved mode `0444`; all mutable-copy paths now create writable destinations. |
+| Install | 2 | 336.06s | 1 | The harness waited for the obsolete greeter marker `Opinionated`; the real ISO displayed the current distinctive marker `Agentic`. |
+| Install | 3 | 475.92s | 0 | Installed successfully and produced an intermediate base; it was later superseded after rebuilding the ISO. One bounded SSH bootstrap attempt timed out before the retry succeeded. |
+| Install | final | 476s | 0 | Final attempt-9 ISO installed and produced run `20260903-231936` plus the reusable base above. One bounded SSH bootstrap attempt timed out before the retry succeeded. |
+| Acceptance | 1 | 155.34s | 1 | The visible reminder prompt was missed by Tesseract sparse-text mode. A same-image mode-6 fallback was added only after the primary mode-11 miss. |
+| Acceptance | command retry | 0s | 1 | The wrapper was accidentally invoked from the ISO checkout, which is not a flake; this operator error was preserved and the command was rerun from the Kids worktree. |
+| Acceptance | 3 | 171s | 1 | A rapid hide/reveal sequence lost a bar position probe. The production request path now coalesces one pending replay, with the async transition behavior tested independently. |
+| Acceptance | pre-mitigation final | 1,360s | 1 | The configured 600-second SSH wait consumed roughly twice that wall time, then continued because readiness failure was not propagated. The guest eventually booted but correctly failed the `no failed system units` assertion on `plymouth-start.service`. |
+| Acceptance | controlled boot | 62.805s | 0 | An isolated overlay with identical base/firmware/device arguments and `-serial none` received no guest input or screenshot for 60 seconds, then passed the first SSH probe. Only `tty0` was active, no `console=` was injected, both Plymouth units succeeded, no unit failed, and shutdown plus `qemu-img check` were clean. |
+| Acceptance | canonical final | 155.310s | 0 | Run `20260904-000715` passed every shortcut smoke and all in-guest suites, including bar hide/park/reveal, reminder OCR, the complete package manifest, and no failed system or user units. |
+
+Read-only diagnosis of the 1,360-second failure found `initramfs_async=0` in the actual installed UKI and Limine entry, clean base and overlay images, and a Plymouth readiness stall immediately after ANSI terminal queries on QEMU's output-only `file:` serial backend. The successful first boot completed the same Plymouth phases in milliseconds. The narrow host-harness fix removes that artificial inputless serial console from headless acceptance and integration VMs, uses an absolute wall-clock SSH deadline, and propagates readiness failure. It does not change the installed kernel command line, Plymouth units, or failed-unit assertion.
+
+Behavioral RED/GREEN coverage was added for each generic fix: working-directory anchoring and caller-relative source preservation; published-versus-local package-cache mounts; writable OVMF copies; current greeter text; ordered OCR fallback; bar replay transitions; exact QEMU serial arguments; acceptance wall deadlines and propagation; and integration deadline/bootstrap/factory-reset propagation. The final ISO repository suite passes all shell tests and 63 Python tests.
+
+One unrelated host-side Omarchy aggregate result remains recorded: `./test/all` reported 2 of 227 shell test files failing, `launch-about-test.sh` at `a roomy window animates` and `network-captive-portal-test.sh` because `quickshell` was unavailable in that host test environment. The focused OCR and bar state-machine regressions passed, and the final installed guest acceptance suite passed the corresponding runtime surfaces. These aggregate failures were not changed or concealed as part of the ISO baseline.
+
 ## What remains unproven
 
 - Semantic parity with the upstream Python reference remains unverified because no checked-in reference golden was established. The verified model hash/runtime execution and colored-pixel preprocessing regressions are real evidence, but they are not a reference-parity gate.
@@ -148,6 +226,6 @@ These results are machine-specific experiment measurements, not latency guarante
 - The page cover is a pipeline-spike mechanism and is not tamper-resistant against hostile page script.
 - The experiment uses an ephemeral loopback DevTools endpoint. Production would need a private inherited pipe or equivalently confined control channel.
 - The benchmark uses a small repeating synthetic corpus and does not establish accuracy, content diversity, peak memory, long-run stability, or minimum supported hardware.
-- ISO packaging, managed-policy installation, service startup, and QEMU/VM acceptance integration have not been performed.
+- The upstream baseline ISO packaging and QEMU install/acceptance path are now proven on this machine, but Kids package installation, managed-browser policy, filter-service startup, and Kids-specific ISO acceptance remain unperformed.
 
 The next milestone may treat the controlled interception architecture as demonstrated, but production work must not treat this result as a pornography-classification validation or deployment approval.
