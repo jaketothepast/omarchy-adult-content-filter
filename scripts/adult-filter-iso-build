@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ ! -d ${OMARCHY_ADULT_FILTER_PACKAGE_SOURCE:-} ]]; then
+  echo "ERROR adult-filter-iso-build: package source not found: ${OMARCHY_ADULT_FILTER_PACKAGE_SOURCE:-<unset>}" >&2
+  exit 1
+fi
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Resolved beside this script at runtime.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-workspace"
+
+OMARCHY_ADULT_FILTER_PACKAGE_SOURCE=$(realpath "$OMARCHY_ADULT_FILTER_PACKAGE_SOURCE")
+OMARCHY_ADULT_FILTER_ISO_TAG=${OMARCHY_ADULT_FILTER_ISO_TAG:-adult-filter-$(date -u +%Y%m%d-%H%M%S-%N)}
+
+exec "$OMARCHY_ISO_PATH/bin/omarchy-iso-make" \
+  --keep-pkg-cache \
+  --no-boot-offer \
+  --local-source "$OMARCHY_PATH" "$OMARCHY_PKGS_PATH" \
+  --local-package omarchy-adult-content-filter "$OMARCHY_ADULT_FILTER_PACKAGE_SOURCE" \
+  --output-tag "$OMARCHY_ADULT_FILTER_ISO_TAG"

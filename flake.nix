@@ -1,5 +1,5 @@
 {
-  description = "Local-only Omarchy Kids managed-browser filter experiment";
+  description = "Omarchy Adult Content Filter managed-browser experiment";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/9387b3fcc0c23c86661636da63faabad4235a0a6";
 

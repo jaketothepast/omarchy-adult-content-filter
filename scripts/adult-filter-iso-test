@@ -1,0 +1,38 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if (($# == 0)); then
+  echo "Usage: adult-filter-iso-test <path-to.iso> [arguments...]" >&2
+  exit 2
+fi
+
+iso=$1
+shift
+if [[ ! -f $iso ]]; then
+  echo "ERROR adult-filter-iso-test: ISO not found: $iso" >&2
+  exit 1
+fi
+iso=$(realpath "$iso")
+
+if [[ ! -d ${OMARCHY_ADULT_FILTER_PACKAGE_SOURCE:-} ]]; then
+  echo "ERROR adult-filter-iso-test: package source not found: ${OMARCHY_ADULT_FILTER_PACKAGE_SOURCE:-<unset>}" >&2
+  exit 1
+fi
+OMARCHY_ADULT_FILTER_PACKAGE_SOURCE=$(realpath "$OMARCHY_ADULT_FILTER_PACKAGE_SOURCE")
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Resolved beside this script at runtime.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-workspace"
+
+for argument in "$@"; do
+  if [[ $argument == "--external-acceptance" ]]; then
+    echo "ERROR adult-filter-iso-test: --external-acceptance is managed by this wrapper" >&2
+    exit 1
+  fi
+done
+
+export OMARCHY_ISO_MANAGE_HOST_DEPS=0
+exec "$OMARCHY_ISO_PATH/bin/omarchy-iso-test" \
+  "$iso" --refuse-existing-base --external-acceptance "$OMARCHY_ADULT_FILTER_PACKAGE_SOURCE" "$@"

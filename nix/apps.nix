@@ -133,12 +133,12 @@ in
     runtimeInputs = isoUnitInputs ++ (with pkgs; [ docker-client ]);
   };
 
-  kids-iso-build = mkApp {
-    name = "kids-iso-build";
-    description = "Build the private controlled-demo ISO from reviewed local sources";
-    command = scriptCommand "kids-iso-build";
+  adult-filter-iso-build = mkApp {
+    name = "adult-filter-iso-build";
+    description = "Build an Omarchy ISO containing the opt-in adult content filter";
+    command = scriptCommand "adult-filter-iso-build";
     runtimeInputs = isoUnitInputs ++ (with pkgs; [ docker-client ]);
-    runtimeEnvironment.OMARCHY_KIDS_PACKAGE_SOURCE = source;
+    runtimeEnvironment.OMARCHY_ADULT_FILTER_PACKAGE_SOURCE = source;
   };
 
   iso-test = mkApp {
@@ -149,13 +149,13 @@ in
     runtimeEnvironment = firmwareEnvironment;
   };
 
-  kids-iso-test = mkApp {
-    name = "kids-iso-test";
-    description = "Run the private controlled-demo ISO acceptance proof";
-    command = scriptCommand "kids-iso-test";
+  adult-filter-iso-test = mkApp {
+    name = "adult-filter-iso-test";
+    description = "Validate the installed adult content filter in an Omarchy VM";
+    command = scriptCommand "adult-filter-iso-test";
     runtimeInputs = isoVmInputs;
     runtimeEnvironment = firmwareEnvironment // {
-      OMARCHY_KIDS_PACKAGE_SOURCE = source;
+      OMARCHY_ADULT_FILTER_PACKAGE_SOURCE = source;
     };
   };
 

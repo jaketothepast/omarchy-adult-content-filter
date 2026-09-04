@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-TEST="$ROOT/test/acceptance.d/browser-filter-demo-test.sh"
+TEST="$ROOT/test/acceptance.d/adult-content-filter-test.sh"
 
 export OMARCHY_ACCEPTANCE_DIR=${OMARCHY_ACCEPTANCE_DIR:-/tmp/omarchy-external-acceptance}
 mkdir -p "$OMARCHY_ACCEPTANCE_DIR"

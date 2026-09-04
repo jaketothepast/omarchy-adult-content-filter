@@ -1,70 +1,57 @@
-# Omarchy Kids browser filter
+# Omarchy Adult Content Filter
 
-This repository contains a local-only host experiment for running a managed Chromium session with ONNX image inference. The controlled fixture demonstrates response-stage image interception, an opaque pre-reveal cover, deterministic replacement, clean browser shutdown, and disposable-profile removal. It is a pipeline proof, not a content-classification product, a NudeNet accuracy result, or evidence of real-world pornography blocking.
+This repository builds an opt-in, browser-only adult-content filtering package for Omarchy. The installed application launches a dedicated managed Chromium instance with its own disposable profile; it does not modify the user's ordinary Chromium profile or make itself the system default browser.
 
-## Reproduce the host experiment
+Filtering is layered:
 
-Run the full checks, the release benchmark, and the headed-browser proof from the repository root:
+1. A pinned adult-domain list blocks matching requests before network access.
+2. Google searches are rewritten to force SafeSearch, and YouTube requests receive the strict restricted-mode header.
+3. A document-start cover prevents unreviewed page imagery from flashing onscreen.
+4. Successful static JPEG and PNG responses are inspected locally with the pinned NudeNet ONNX model. Explicit detections are replaced; decoding, model, timeout, and policy failures are also replaced.
+5. Replacing an image taints its connected media control, so a thumbnail associated with a video prevents that video from playing without blocking unrelated videos on the page.
+
+The managed instance permits one page, denies downloads, disables DevTools, accepts only complete HTTP(S) top-level navigations, and fails closed when it cannot settle an intercepted response or cleanly maintain its supervision boundary.
+
+## Installable Omarchy package
+
+The plugin-facing package and command are both named `omarchy-adult-content-filter`. The package contains the Rust supervisor, private ONNX Runtime, pinned NudeNet model, pinned domain policy, cover extension, desktop entry, and notices. It deliberately installs no system service, autostart entry, MIME association, default-browser handler, user account, sudo rule, or global Chromium policy.
+
+After installation, launch **Omarchy Adult Content Filter** from the app menu or run:
+
+```bash
+omarchy-adult-content-filter
+```
+
+The public launcher accepts no arguments and refuses to run as root. Runtime state and the Chromium profile stay beneath its private directory in `XDG_RUNTIME_DIR` and are removed when the browser exits.
+
+This browser-only package does not prevent a user from launching another browser, replacing the executable, or changing the machine when that user already has administrative access. Account restrictions and OS-level enforcement are intentionally deferred to a separate Omarchy Kids system layer; they are not part of this plugin.
+
+## Host development
+
+Run the full checks, local inference benchmark, controlled headed proof, or persistent browser from the repository root:
 
 ```bash
 nix flake check
 nix run .#bench -- --iterations 20 --warmups 3 --json
-nix run .#run -- --images 17 --flagged-index 5 --hold-millis 500 --assert-no-flash --json
-```
-
-The browser command starts stock headed Chromium with a disposable profile and a loopback-only fixture. It runs the model on all 17 harmless fixtures, allows 16 responses, and replaces the fixture whose URL carries the deterministic test marker. That marker deliberately overrides the model verdict so the replacement path is exercised without storing explicit imagery.
-
-With `--json`, `run` writes one headed-experiment summary to stdout, including controlled-fixture DOM RGBA metadata. Its per-stage, per-image `MetricRecord` JSONL is written separately to stderr and contains exactly `stage`, `verdict`, `fixture_index`, and `elapsed_micros`. `bench --json` writes four workload summaries to stdout as JSONL, including model/runtime identity, workload configuration, encoded-byte median, and p50/p90/p95 timing objects. These outputs contain no raw image bytes or URLs. Rich run IDs, cache outcomes, pause/cover breakdowns, and memory measurements are future telemetry targets, not current fields.
-
-The measured 2026-09-03 environment, complete p50/p90/p95 benchmark output, browser assertions, performance-gate assessment, and limitations are in [docs/experiment-results.md](docs/experiment-results.md).
-
-## Drive the host-side managed browser
-
-```bash
+nix run .#run -- --images 17 --flagged-index 5 --hold-millis 1500 --assert-no-flash --json
 nix run .#browse
-nix run .#browse -- --url https://example.com --json
 ```
 
-`browse` opens one headed Chromium tab with a new disposable profile and remains attached until the tab/browser is closed or the terminal receives Ctrl-C. A successful HTTP 200 static JPEG or non-animated PNG continues only after local inference returns `Policy::Allow`. Redirects without a rendered body continue. Animated and other formats, plus every body-read, size, decode, model, worker, or policy-processing failure, replace that individual image with the placeholder. Body acquisition, inference, and CDP response settlement each have a five-second deadline; browser launch and cleanup have a thirty-second deadline. There is no total browsing-session deadline. Additional page targets are closed, and failure to close or settle a response closes the managed browser.
+The controlled fixture contains only generated color images. It deterministically exercises one replacement without storing or downloading explicit imagery. JSON summaries contain runtime/model identity and aggregate counters; per-stage JSONL contains only `stage`, `verdict`, `fixture_index`, and `elapsed_micros`.
 
-The document-start cover stays opaque until the active top-level loader reports `load` and no intercepted image response remains unresolved. The final summary contains only model/runtime identity and aggregate counts—never URLs, titles, response bytes, paths, or history. Closing the browser removes the disposable profile.
+## Build and validate in Omarchy
 
-This is a supervised engineering prototype, not a child-safe browser. It does not yet inspect video, audio, canvas, WebGL, CSS backgrounds, `data:` or `blob:` content, downloads, browser chrome, DevTools, or adversarial/tampered pages. Subframes remain covered because this version reveals only the supervised top-level document. Do not use it as unsupervised child protection.
-
-## Build and test the private controlled demo ISO
+The product-named wrappers use the reviewed local Omarchy, ISO, package, and filter checkouts:
 
 ```bash
-nix run .#kids-iso-build
-nix run .#kids-iso-test -- /absolute/path/to/omarchy-kids-demo.iso --reuse-base --no-preview
+nix run .#adult-filter-iso-build
+nix run .#adult-filter-iso-test -- /absolute/path/to/omarchy-adult-filter.iso --reuse-base --no-preview
 ```
 
-This is a private, non-redistributable controlled demo for the 17-image local fixture only. It does not establish arbitrary-site filtering, pornography-classifier accuracy, default-browser enforcement, tamper resistance, supervision, or redistribution rights.
-
-## Development
-
-Enter the pinned development environment and run the workspace tests:
-
-```bash
-nix develop -c cargo test --workspace
-```
-
-The flake exposes five runnable experiment apps:
-
-- `infer` runs standalone model inference.
-- `bench` measures the 1-, 13-, 19-, and 62-image workloads.
-- `run` launches the controlled headed-browser experiment.
-- `browse` launches the persistent single-tab host prototype.
-- `check` runs formatting, lint, and workspace tests.
-
-The binary reserves a `doctor` subcommand as an explicitly unimplemented placeholder. It exits with `doctor is not implemented` and is not exposed as a Nix app; the separate ISO workflow milestone owns the real environment doctor.
-
-The development shell and packaged binary provide these environment variables:
-
-- `ORT_DYLIB_PATH`
-- `NUDENET_MODEL_PATH`
-- `CHROMIUM_BIN`
-- `OMARCHY_KIDS_EXTENSION_DIR`
+The installed acceptance proof checks exact package contents, ownership, permissions, model and policy identities, managed-browser launch flags, the headed controlled fixture, privacy-safe telemetry, profile cleanup, and process cleanup.
 
 ## Scope limits
 
-The experiment does not validate NudeNet accuracy, model suitability, adversarial robustness, or model licensing and training-data provenance for distribution. A checked-in Python-reference golden was not produced, so semantic parity with the upstream reference implementation remains unverified; the model hash/runtime checks and colored-pixel preprocessing tests do not establish that parity. The experiment also does not cover video, canvas or WebGL rendering, CSS background images, `data:` or `blob:` URLs, service-worker and cache variants, dynamically loaded content, hostile-page cover bypasses, browsers outside the supervised Chromium process, or ISO integration.
+This is a filtering prototype, not a guarantee that every adult page or adversarial rendering will be detected. The model path currently covers ordinary static JPEG/PNG image responses; canvas, WebGL, CSS background images, encrypted media streams, audio, extensions outside the packaged surface, and hostile browser/OS modification remain outside the demonstrated boundary. The pinned model and domain list also require a separate redistribution review before public release.
+
+Measured benchmark, host-browser, and controlled ISO results are recorded in [docs/experiment-results.md](docs/experiment-results.md). Internal Rust and environment-variable names retain `omarchy-kids` compatibility until a later code-only migration; the installed product surface is `omarchy-adult-content-filter`.

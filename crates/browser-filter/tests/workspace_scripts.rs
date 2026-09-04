@@ -872,6 +872,170 @@ fn kids_iso_build_rejects_a_missing_package_source_before_delegation() {
     );
 }
 
+#[test]
+fn adult_filter_iso_build_forwards_the_product_package_and_unique_tag() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    let package_source = fixture.path().join("adult filter source");
+    fs::create_dir(&package_source).unwrap();
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-make"),
+        "printf 'ARG=%s\\n' \"$@\"\n",
+    );
+    let tag = Path::new("adult-filter-contract");
+
+    let output = run_wrapper(
+        "adult-filter-iso-build",
+        &workspace,
+        &[],
+        &[
+            (
+                "OMARCHY_ADULT_FILTER_PACKAGE_SOURCE",
+                package_source.as_path(),
+            ),
+            ("OMARCHY_ADULT_FILTER_ISO_TAG", tag),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "adult-filter ISO build wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout_lines(&output),
+        [
+            "ARG=--keep-pkg-cache",
+            "ARG=--no-boot-offer",
+            "ARG=--local-source",
+            &format!("ARG={}", workspace.omarchy.display()),
+            &format!("ARG={}", workspace.packages.display()),
+            "ARG=--local-package",
+            "ARG=omarchy-adult-content-filter",
+            &format!("ARG={}", package_source.display()),
+            "ARG=--output-tag",
+            "ARG=adult-filter-contract",
+        ]
+    );
+}
+
+#[test]
+fn adult_filter_iso_test_owns_one_external_suite_and_preserves_arguments() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    let fake = r#"printf 'MANAGE=%s\n' "${OMARCHY_ISO_MANAGE_HOST_DEPS-unset}"
+printf 'ARG=%s\n' "$@"
+"#;
+    write_bash_executable(&workspace.iso.join("bin/omarchy-iso-test"), fake);
+    let iso = fixture.path().join("artifacts/adult filter.iso");
+    write_file(&iso, "fixture");
+    let package_source = fixture.path().join("adult filter source");
+    fs::create_dir(&package_source).unwrap();
+
+    let output = run_wrapper(
+        "adult-filter-iso-test",
+        &workspace,
+        &[iso.to_str().unwrap(), "--reuse-base", "--no-preview"],
+        &[(
+            "OMARCHY_ADULT_FILTER_PACKAGE_SOURCE",
+            package_source.as_path(),
+        )],
+    );
+
+    assert!(
+        output.status.success(),
+        "adult-filter ISO test wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        stdout_lines(&output),
+        [
+            "MANAGE=0",
+            &format!("ARG={}", iso.canonicalize().unwrap().display()),
+            "ARG=--refuse-existing-base",
+            "ARG=--external-acceptance",
+            &format!("ARG={}", package_source.display()),
+            "ARG=--reuse-base",
+            "ARG=--no-preview",
+        ]
+    );
+
+    let injected = run_wrapper(
+        "adult-filter-iso-test",
+        &workspace,
+        &[
+            iso.to_str().unwrap(),
+            "--external-acceptance",
+            package_source.to_str().unwrap(),
+        ],
+        &[(
+            "OMARCHY_ADULT_FILTER_PACKAGE_SOURCE",
+            package_source.as_path(),
+        )],
+    );
+    assert!(!injected.status.success());
+    assert!(injected.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(injected.stderr).unwrap(),
+        "ERROR adult-filter-iso-test: --external-acceptance is managed by this wrapper\n"
+    );
+}
+
+#[test]
+fn adult_filter_acceptance_entry_points_are_product_named_and_browser_only() {
+    let runner = fs::read_to_string(repository_root().join("test/acceptance"))
+        .expect("external acceptance runner is missing");
+    assert!(runner.contains("test/acceptance.d/adult-content-filter-test.sh"));
+    assert!(!runner.contains("browser-filter-demo-test.sh"));
+
+    let suite = fs::read_to_string(
+        repository_root().join("test/acceptance.d/adult-content-filter-test.sh"),
+    )
+    .expect("adult-filter acceptance suite is missing");
+    for required in [
+        "PACKAGE=omarchy-adult-content-filter",
+        "/usr/bin/omarchy-adult-content-filter",
+        "/usr/lib/omarchy-adult-content-filter/omarchy-adult-content-filter",
+        "/usr/share/omarchy-adult-content-filter/policies/adult-domains.hosts",
+        "managed browser launcher exits successfully",
+        "controlled detector proof exits successfully",
+    ] {
+        assert!(suite.contains(required), "missing {required:?}");
+    }
+    for forbidden in [
+        "useradd",
+        "passwd",
+        "sudoers",
+        "systemctl enable",
+        "/etc/chromium/policies",
+    ] {
+        assert!(!suite.contains(forbidden), "unexpected {forbidden:?}");
+    }
+
+    let apps = fs::read_to_string(repository_root().join("nix/apps.nix"))
+        .expect("Nix app definitions are missing");
+    for required in [
+        "adult-filter-iso-build = mkApp",
+        "command = scriptCommand \"adult-filter-iso-build\"",
+        "adult-filter-iso-test = mkApp",
+        "command = scriptCommand \"adult-filter-iso-test\"",
+        "OMARCHY_ADULT_FILTER_PACKAGE_SOURCE = source",
+    ] {
+        assert!(apps.contains(required), "missing {required:?}");
+    }
+    assert!(!apps.contains("kids-iso-build = mkApp"));
+    assert!(!apps.contains("kids-iso-test = mkApp"));
+
+    let flake = fs::read_to_string(repository_root().join("flake.nix"))
+        .expect("flake definition is missing");
+    assert!(flake.contains("Omarchy Adult Content Filter"));
+    let readme =
+        fs::read_to_string(repository_root().join("README.md")).expect("README is missing");
+    assert!(readme.starts_with("# Omarchy Adult Content Filter\n"));
+    assert!(readme.contains("browser-only"));
+    assert!(readme.contains("does not prevent a user from launching another browser"));
+}
+
 // Production mutation caught: falling through to the upstream interactive selector makes a
 // supposedly explicit workflow nondeterministic when no ISO path is supplied.
 #[test]
@@ -1902,7 +2066,7 @@ exit 37
         format!(
             "ARG=420\nARG=bash\nARG={}\nXDG={}\nDBUS=unix:path={}/bus\nHYPR={}\nWAYLAND=wayland-9\nARTIFACTS={}\n",
             repository_root()
-                .join("test/acceptance.d/browser-filter-demo-test.sh")
+                .join("test/acceptance.d/adult-content-filter-test.sh")
                 .display(),
             runtime.display(),
             runtime.display(),
