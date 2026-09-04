@@ -67,6 +67,7 @@ let
     jq
     mtools
     openssh
+    openssl
     procps
     python3
     qemu
