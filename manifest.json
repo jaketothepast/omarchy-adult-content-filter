@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.jaketothepast.adult-content-filter",
+  "name": "Omarchy Adult Content Filter",
+  "version": "0.1.0",
+  "author": "jaketothepast",
+  "license": "AGPL-3.0-only",
+  "description": "A supervised managed Chromium session with layered adult-domain and local image filtering.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Adult Content Filter",
+    "description": "Launch and supervise the managed filtering browser.",
+    "category": "Security",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
