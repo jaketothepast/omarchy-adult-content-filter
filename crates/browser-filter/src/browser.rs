@@ -1227,6 +1227,22 @@ pub(crate) fn fetch_enable_params() -> EnableParams {
         .build()
 }
 
+pub(crate) fn managed_fetch_enable_params() -> EnableParams {
+    EnableParams::builder()
+        .pattern(
+            RequestPattern::builder()
+                .request_stage(RequestStage::Request)
+                .build(),
+        )
+        .pattern(
+            RequestPattern::builder()
+                .resource_type(ResourceType::Image)
+                .request_stage(RequestStage::Response)
+                .build(),
+        )
+        .build()
+}
+
 pub(crate) fn continue_response(request_id: RequestId) -> ContinueResponseParams {
     ContinueResponseParams::new(request_id)
 }
@@ -1431,8 +1447,9 @@ mod tests {
         MAX_OPERATION_TIMEOUT, MetricBuffer, PauseLedger, RunCounts, ValidatedRevealLatency,
         assert_cover_screenshot, assert_dom_image_colors, assert_reveal_screenshot,
         continue_response, decode_response_body, fetch_enable_params, finish_response_after_cdp,
-        finish_reveal_after_response, flush_metrics, perform_cleanup, replacement_headers,
-        replacement_response, resolve_and_buffer_metrics, response_requires_body,
+        finish_reveal_after_response, flush_metrics, managed_fetch_enable_params, perform_cleanup,
+        replacement_headers, replacement_response, resolve_and_buffer_metrics,
+        response_requires_body,
     };
     use crate::inference::{
         DEFAULT_MAX_ENCODED_BYTES, DEFAULT_MAX_PIXELS, Detector, MODEL_SHA256, ModelConfig,
@@ -2131,6 +2148,21 @@ mod tests {
         assert_eq!(patterns[0].url_pattern, None);
         assert_eq!(patterns[0].resource_type, Some(ResourceType::Image));
         assert_eq!(patterns[0].request_stage, Some(RequestStage::Response));
+        assert_eq!(params.handle_auth_requests, None);
+    }
+
+    #[test]
+    fn managed_fetch_configuration_checks_every_request_before_image_responses() {
+        let params = managed_fetch_enable_params();
+        let patterns = params.patterns.unwrap();
+
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0].url_pattern, None);
+        assert_eq!(patterns[0].resource_type, None);
+        assert_eq!(patterns[0].request_stage, Some(RequestStage::Request));
+        assert_eq!(patterns[1].url_pattern, None);
+        assert_eq!(patterns[1].resource_type, Some(ResourceType::Image));
+        assert_eq!(patterns[1].request_stage, Some(RequestStage::Response));
         assert_eq!(params.handle_auth_requests, None);
     }
 

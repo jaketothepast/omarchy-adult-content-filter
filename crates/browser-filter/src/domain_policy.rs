@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 const MAX_POLICY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_POLICY_ENTRIES: usize = 250_000;
+pub const PINNED_ADULT_DOMAIN_COUNT: usize = 76_767;
 
 #[derive(Debug)]
 pub struct DomainPolicy {
@@ -260,6 +261,6 @@ mod tests {
             .expect("OMARCHY_KIDS_BLOCKLIST_PATH must be supplied by the build environment");
         let policy = DomainPolicy::load(path.as_ref()).unwrap();
 
-        assert_eq!(policy.entry_count(), 76_767);
+        assert_eq!(policy.entry_count(), super::PINNED_ADULT_DOMAIN_COUNT);
     }
 }

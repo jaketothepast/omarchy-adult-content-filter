@@ -11,6 +11,7 @@ pub enum RequestDecision {
     ReplaceHeaders(Vec<(String, String)>),
 }
 
+#[derive(Debug)]
 pub struct RequestPolicy {
     domains: DomainPolicy,
 }

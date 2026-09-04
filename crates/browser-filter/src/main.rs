@@ -11,6 +11,7 @@ use omarchy_kids_browser_filter::benchmark::{BenchmarkConfig, BenchmarkSummary, 
 use omarchy_kids_browser_filter::browser::{
     BrowserExperiment, ExperimentConfig, ExperimentSummary,
 };
+use omarchy_kids_browser_filter::domain_policy::{DomainPolicy, PINNED_ADULT_DOMAIN_COUNT};
 use omarchy_kids_browser_filter::fixture::FixtureServer;
 use omarchy_kids_browser_filter::inference::{
     DEFAULT_MAX_ENCODED_BYTES, DEFAULT_MAX_PIXELS, Detector, InferenceReport, MODEL_SHA256,
@@ -21,6 +22,7 @@ use omarchy_kids_browser_filter::managed::{
 };
 use omarchy_kids_browser_filter::metrics::MetricSink;
 use omarchy_kids_browser_filter::policy::Policy;
+use omarchy_kids_browser_filter::request_policy::RequestPolicy;
 use serde::Serialize;
 use url::Url;
 
@@ -113,7 +115,11 @@ fn browse(start_url: Option<Url>, json: bool) -> Result<()> {
         Duration::from_secs(5),
         Duration::from_secs(30),
     )?;
-    let summary = ManagedBrowser::new(load_detector()?, Policy).run(config)?;
+    let request_policy = load_request_policy(&PathBuf::from(
+        std::env::var_os("OMARCHY_KIDS_BLOCKLIST_PATH")
+            .context("OMARCHY_KIDS_BLOCKLIST_PATH is not set")?,
+    ))?;
+    let summary = ManagedBrowser::new(load_detector()?, Policy, request_policy).run(config)?;
 
     drop(profile);
     anyhow::ensure!(
@@ -134,7 +140,11 @@ fn write_managed_output<W: Write>(
     } else {
         writeln!(
             writer,
-            "{} intercepted, {} continued, {} replaced ({} fail-closed), {} canceled by navigation, {} documents media-blocked, {} extra pages blocked",
+            "{} known adult domains loaded; {} domain requests blocked; {} searches hardened; {} YouTube requests restricted; {} intercepted images, {} continued, {} replaced ({} fail-closed), {} canceled by navigation, {} documents media-blocked, {} extra pages blocked",
+            summary.blocklist_entries,
+            summary.domain_blocked_requests,
+            summary.safe_search_rewrites,
+            summary.youtube_restricted_requests,
             summary.intercepted,
             summary.continued,
             summary.replaced,
@@ -145,6 +155,16 @@ fn write_managed_output<W: Write>(
         )?;
     }
     Ok(())
+}
+
+fn load_request_policy(path: &Path) -> Result<RequestPolicy> {
+    let domain_policy = DomainPolicy::load(path)?;
+    anyhow::ensure!(
+        domain_policy.entry_count() == PINNED_ADULT_DOMAIN_COUNT,
+        "adult-domain policy contains {}, expected {PINNED_ADULT_DOMAIN_COUNT}",
+        domain_policy.entry_count()
+    );
+    Ok(RequestPolicy::new(domain_policy))
 }
 
 fn run(
@@ -324,6 +344,64 @@ fn browse_cli_accepts_a_blank_start_or_one_web_url() {
 #[test]
 fn browse_cli_rejects_a_malformed_url() {
     assert!(Cli::try_parse_from(["filter", "browse", "--url", "not a URL"]).is_err());
+}
+
+#[test]
+fn managed_policy_loader_rejects_an_unreviewed_entry_count() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("unreviewed.hosts");
+    std::fs::write(&path, b"0.0.0.0 one.example.test\n").unwrap();
+
+    assert_eq!(
+        load_request_policy(&path).unwrap_err().to_string(),
+        "adult-domain policy contains 1, expected 76767"
+    );
+}
+
+#[test]
+fn managed_output_reports_layer_counts_without_browsing_data() {
+    let summary = ManagedBrowserSummary {
+        chromium_version: "Chromium/152".to_owned(),
+        onnx_runtime_version: "1.27.1".to_owned(),
+        model_sha256: "model-sha".to_owned(),
+        intercepted: 4,
+        continued: 2,
+        replaced: 2,
+        failed_closed: 1,
+        canceled: 1,
+        media_blocked_documents: 1,
+        domain_blocked_requests: 3,
+        safe_search_rewrites: 5,
+        youtube_restricted_requests: 7,
+        blocklist_entries: 76_767,
+        blocked_extra_pages: 0,
+        unresolved: 0,
+        clean_shutdown: true,
+    };
+    let mut human = Vec::new();
+    write_managed_output(&mut human, &summary, false).unwrap();
+    let human = String::from_utf8(human).unwrap();
+    for expected in [
+        "76767 known adult domains loaded",
+        "3 domain requests blocked",
+        "5 searches hardened",
+        "7 YouTube requests restricted",
+        "1 documents media-blocked",
+    ] {
+        assert!(
+            human.contains(expected),
+            "missing {expected:?} from {human:?}"
+        );
+    }
+    assert!(!human.contains("http"));
+
+    let mut json = Vec::new();
+    write_managed_output(&mut json, &summary, true).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(value["domain_blocked_requests"], 3);
+    assert_eq!(value["safe_search_rewrites"], 5);
+    assert_eq!(value["youtube_restricted_requests"], 7);
+    assert!(!String::from_utf8(json).unwrap().contains("http"));
 }
 
 // Production mutation caught: removing or renaming a benchmark option, or parsing its numeric

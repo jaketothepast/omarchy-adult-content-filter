@@ -9,8 +9,13 @@ use anyhow::{Context, Result};
 use chromiumoxide::{
     Browser, BrowserConfig, Page,
     cdp::browser_protocol::{
-        fetch::{EventRequestPaused, GetResponseBodyParams, RequestId},
-        network::{EventRequestWillBeSent, LoaderId, RequestId as NetworkRequestId},
+        fetch::{
+            ContinueRequestParams, EventRequestPaused, FailRequestParams, GetResponseBodyParams,
+            HeaderEntry, RequestId,
+        },
+        network::{
+            ErrorReason, EventRequestWillBeSent, Headers, LoaderId, RequestId as NetworkRequestId,
+        },
         page::{
             AddScriptToEvaluateOnNewDocumentParams, EventFrameNavigated, EventLifecycleEvent,
             GetFrameTreeParams, NavigateParams, SetLifecycleEventsEnabledParams,
@@ -26,10 +31,11 @@ use url::Url;
 use crate::{
     browser::{
         HeadedDetectorSession, cleanup_browser, continue_response, decode_response_body,
-        fetch_enable_params, replacement_response,
+        managed_fetch_enable_params, replacement_response,
     },
     inference::{DEFAULT_MAX_ENCODED_BYTES, Detector, InferenceReport},
     policy::{Policy, Verdict},
+    request_policy::{RequestDecision, RequestPolicy},
 };
 
 const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -103,6 +109,103 @@ enum ResponsePlan {
     ContinueRedirect,
     Classify,
     ReplaceFailedClosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PauseStage {
+    Request,
+    Response,
+}
+
+fn pause_stage(response_status_code: Option<i64>, has_response_error: bool) -> PauseStage {
+    if response_status_code.is_some() || has_response_error {
+        PauseStage::Response
+    } else {
+        PauseStage::Request
+    }
+}
+
+enum RequestCommand {
+    Fail(FailRequestParams),
+    Continue(ContinueRequestParams),
+}
+
+impl RequestCommand {
+    #[cfg(test)]
+    fn is_fail(&self) -> bool {
+        matches!(self, Self::Fail(_))
+    }
+
+    #[cfg(test)]
+    fn json(&self) -> serde_json::Value {
+        match self {
+            Self::Fail(params) => serde_json::to_value(params).unwrap(),
+            Self::Continue(params) => serde_json::to_value(params).unwrap(),
+        }
+    }
+}
+
+fn request_command(request_id: RequestId, decision: RequestDecision) -> RequestCommand {
+    match decision {
+        RequestDecision::BlockDomain => RequestCommand::Fail(FailRequestParams::new(
+            request_id,
+            ErrorReason::BlockedByClient,
+        )),
+        RequestDecision::Continue => {
+            RequestCommand::Continue(ContinueRequestParams::new(request_id))
+        }
+        RequestDecision::RewriteUrl(url) => RequestCommand::Continue(
+            ContinueRequestParams::builder()
+                .request_id(request_id)
+                .url(url)
+                .build()
+                .expect("rewritten request contains its required identifier"),
+        ),
+        RequestDecision::ReplaceHeaders(headers) => RequestCommand::Continue(
+            ContinueRequestParams::builder()
+                .request_id(request_id)
+                .headers(
+                    headers
+                        .into_iter()
+                        .map(|(name, value)| HeaderEntry::new(name, value)),
+                )
+                .build()
+                .expect("header-hardened request contains its required identifier"),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestLayerOutcome {
+    Continued,
+    DomainBlocked,
+    SafeSearchRewritten,
+    YouTubeRestricted,
+}
+
+fn request_outcome(decision: &RequestDecision) -> RequestLayerOutcome {
+    match decision {
+        RequestDecision::BlockDomain => RequestLayerOutcome::DomainBlocked,
+        RequestDecision::Continue => RequestLayerOutcome::Continued,
+        RequestDecision::RewriteUrl(_) => RequestLayerOutcome::SafeSearchRewritten,
+        RequestDecision::ReplaceHeaders(_) => RequestLayerOutcome::YouTubeRestricted,
+    }
+}
+
+fn network_headers(headers: &Headers) -> Result<Vec<(String, String)>> {
+    let object = headers
+        .inner()
+        .as_object()
+        .context("managed request headers were not an object")?;
+    object
+        .iter()
+        .map(|(name, value)| {
+            value
+                .as_str()
+                .map(|value| (name.clone(), value.to_owned()))
+                .with_context(|| format!("managed request header {name} was not text"))
+        })
+        .collect()
 }
 
 fn response_plan(response_status_code: Option<i64>, has_response_error: bool) -> ResponsePlan {
@@ -310,6 +413,29 @@ struct ManualCounts {
     failed_closed: usize,
     canceled: usize,
     media_blocked_documents: usize,
+    domain_blocked_requests: usize,
+    safe_search_rewrites: usize,
+    youtube_restricted_requests: usize,
+}
+
+fn record_request_outcome(outcome: RequestLayerOutcome, counts: &mut ManualCounts) {
+    match outcome {
+        RequestLayerOutcome::Continued => {}
+        RequestLayerOutcome::DomainBlocked => counts.domain_blocked_requests += 1,
+        RequestLayerOutcome::SafeSearchRewritten => counts.safe_search_rewrites += 1,
+        RequestLayerOutcome::YouTubeRestricted => counts.youtube_restricted_requests += 1,
+    }
+}
+
+#[cfg(test)]
+fn settle_request_decision(
+    outcome: RequestLayerOutcome,
+    counts: &mut ManualCounts,
+    resolve: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    resolve()?;
+    record_request_outcome(outcome, counts);
+    Ok(())
 }
 
 #[derive(Default)]
@@ -439,6 +565,10 @@ pub struct ManagedBrowserSummary {
     pub failed_closed: usize,
     pub canceled: usize,
     pub media_blocked_documents: usize,
+    pub domain_blocked_requests: usize,
+    pub safe_search_rewrites: usize,
+    pub youtube_restricted_requests: usize,
+    pub blocklist_entries: usize,
     pub blocked_extra_pages: usize,
     pub unresolved: usize,
     pub clean_shutdown: bool,
@@ -447,11 +577,16 @@ pub struct ManagedBrowserSummary {
 pub struct ManagedBrowser {
     detector: Detector,
     policy: Policy,
+    request_policy: RequestPolicy,
 }
 
 impl ManagedBrowser {
-    pub fn new(detector: Detector, policy: Policy) -> Self {
-        Self { detector, policy }
+    pub fn new(detector: Detector, policy: Policy, request_policy: RequestPolicy) -> Self {
+        Self {
+            detector,
+            policy,
+            request_policy,
+        }
     }
 
     pub fn run(self, config: ManagedBrowserConfig) -> Result<ManagedBrowserSummary> {
@@ -470,7 +605,11 @@ async fn run_managed_browser(
     managed: ManagedBrowser,
     config: ManagedBrowserConfig,
 ) -> Result<ManagedBrowserSummary> {
-    let ManagedBrowser { detector, policy } = managed;
+    let ManagedBrowser {
+        detector,
+        policy,
+        request_policy,
+    } = managed;
     let browser_config = BrowserConfig::builder()
         .chrome_executable(&config.chromium_bin)
         .with_head()
@@ -486,7 +625,15 @@ async fn run_managed_browser(
 
     let browser_result = match Browser::launch(browser_config).await {
         Ok((browser, handler)) => {
-            run_managed_with_browser(browser, handler, &detector_session, &policy, &config).await
+            run_managed_with_browser(
+                browser,
+                handler,
+                &detector_session,
+                &policy,
+                &request_policy,
+                &config,
+            )
+            .await
         }
         Err(error) => Err(error).context("failed to launch managed Chromium"),
     };
@@ -507,6 +654,7 @@ async fn run_managed_with_browser(
     mut handler: chromiumoxide::Handler,
     detector_session: &HeadedDetectorSession,
     policy: &Policy,
+    request_policy: &RequestPolicy,
     config: &ManagedBrowserConfig,
 ) -> Result<ManagedBrowserSummary> {
     let handler_task = tokio::spawn(async move {
@@ -516,7 +664,14 @@ async fn run_managed_with_browser(
         Ok::<_, anyhow::Error>(())
     });
 
-    let run_result = managed_event_loop(&mut browser, detector_session, policy, config).await;
+    let run_result = managed_event_loop(
+        &mut browser,
+        detector_session,
+        policy,
+        request_policy,
+        config,
+    )
+    .await;
     let already_exited = browser
         .try_wait()
         .context("failed to inspect managed Chromium process")?
@@ -571,6 +726,7 @@ async fn managed_event_loop(
     browser: &mut Browser,
     detector_session: &HeadedDetectorSession,
     policy: &Policy,
+    request_policy: &RequestPolicy,
     config: &ManagedBrowserConfig,
 ) -> Result<ManagedBrowserSummary> {
     let page = within(
@@ -643,19 +799,24 @@ async fn managed_event_loop(
     )
     .await?
     .context("failed to enable page lifecycle events")?;
-    within(
-        config.acquisition_timeout,
-        page.execute(fetch_enable_params()),
-        "Fetch.enable deadline elapsed",
-    )
-    .await?
-    .context("failed to enable image response interception")?;
 
     let mut state = ManualPageState::default();
     let initial = current_main_frame(&page, config.acquisition_timeout).await?;
     state.navigation_started(initial.1.as_ref());
     state.load_completed(initial.1.as_ref());
     reveal_current_document(&page, config.acquisition_timeout).await?;
+
+    // The page is still the local about:blank target here. Establish its frame
+    // state before enabling the catch-all request-stage interceptor; every
+    // externally navigated request is still covered because navigation begins
+    // only after Fetch.enable completes below.
+    within(
+        config.acquisition_timeout,
+        page.execute(managed_fetch_enable_params()),
+        "Fetch.enable deadline elapsed",
+    )
+    .await?
+    .context("failed to enable image response interception")?;
     within(
         config.acquisition_timeout,
         page.activate(),
@@ -689,15 +850,32 @@ async fn managed_event_loop(
             }
             event = pauses.next() => {
                 let Some(event) = event else { break; };
-                process_managed_pause(
-                    &page,
-                    event.as_ref(),
-                    detector_session,
-                    policy,
-                    config,
-                    &mut state,
-                    &mut requests,
-                ).await?;
+                match pause_stage(
+                    event.response_status_code,
+                    event.response_error_reason.is_some(),
+                ) {
+                    PauseStage::Request => {
+                        process_managed_request_pause(
+                            &page,
+                            event.as_ref(),
+                            request_policy,
+                            config,
+                            &mut state,
+                            &mut requests,
+                        ).await?;
+                    }
+                    PauseStage::Response => {
+                        process_managed_response_pause(
+                            &page,
+                            event.as_ref(),
+                            detector_session,
+                            policy,
+                            config,
+                            &mut state,
+                            &mut requests,
+                        ).await?;
+                    }
+                }
                 reveal_if_current_and_ready(&page, config, &state).await?;
             }
             event = requests.next() => {
@@ -759,6 +937,10 @@ async fn managed_event_loop(
         failed_closed: state.counts.failed_closed,
         canceled: state.counts.canceled,
         media_blocked_documents: state.counts.media_blocked_documents,
+        domain_blocked_requests: state.counts.domain_blocked_requests,
+        safe_search_rewrites: state.counts.safe_search_rewrites,
+        youtube_restricted_requests: state.counts.youtube_restricted_requests,
+        blocklist_entries: request_policy.blocklist_entries(),
         blocked_extra_pages,
         unresolved: state.ledger.unresolved_count(),
         clean_shutdown: false,
@@ -912,7 +1094,7 @@ async fn install_media_guard(page: &Page, deadline: Duration) -> Result<()> {
     Ok(())
 }
 
-async fn process_managed_pause(
+async fn process_managed_response_pause(
     page: &Page,
     event: &EventRequestPaused,
     detector_session: &HeadedDetectorSession,
@@ -998,6 +1180,81 @@ async fn process_managed_pause(
     }
     if classification == Classification::ReplaceFailedClosed {
         state.counts.failed_closed += 1;
+    }
+    Ok(())
+}
+
+async fn process_managed_request_pause(
+    page: &Page,
+    event: &EventRequestPaused,
+    request_policy: &RequestPolicy,
+    config: &ManagedBrowserConfig,
+    state: &mut ManualPageState,
+    requests: &mut EventStream<EventRequestWillBeSent>,
+) -> Result<()> {
+    let request_url = Url::parse(&event.request.url).context("managed request URL was invalid")?;
+    let headers = network_headers(&event.request.headers)?;
+    let decision = request_policy.evaluate(&request_url, &headers)?;
+    let outcome = request_outcome(&decision);
+    let command = request_command(event.request_id.clone(), decision);
+    let resolution = match command {
+        RequestCommand::Fail(params) => match within(
+            config.acquisition_timeout,
+            page.execute(params),
+            "Fetch.failRequest deadline elapsed",
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(anyhow::Error::from(error)),
+            Err(error) => Err(error),
+        },
+        RequestCommand::Continue(params) => match within(
+            config.acquisition_timeout,
+            page.execute(params),
+            "Fetch.continueRequest deadline elapsed",
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(anyhow::Error::from(error)),
+            Err(error) => Err(error),
+        },
+    };
+    if let Err(error) = resolution {
+        let request_loader = request_loader_for(
+            event.network_id.as_ref(),
+            requests,
+            &mut state.request_loaders,
+            config.acquisition_timeout,
+        )
+        .await;
+        if invalid_interception_error(&error)
+            && let Ok((_, current_loader)) =
+                current_main_frame(page, config.acquisition_timeout).await
+            && discardable_obsolete_interception(
+                &error,
+                request_loader.as_ref().map(LoaderId::as_ref),
+                current_loader.as_ref(),
+            )
+        {
+            return Ok(());
+        }
+        return Err(error).context("failed to settle a managed request before network transfer");
+    }
+
+    record_request_outcome(outcome, &mut state.counts);
+    if outcome == RequestLayerOutcome::DomainBlocked
+        && event.resource_type == chromiumoxide::cdp::browser_protocol::network::ResourceType::Image
+    {
+        let (current_frame, current_loader) =
+            current_main_frame(page, config.acquisition_timeout).await?;
+        if event.frame_id == current_frame {
+            block_media_for_current_document(page, &event.request.url, config.acquisition_timeout)
+                .await?;
+            state.navigation_started(current_loader.as_ref());
+            state.mark_media_blocked(current_loader.as_ref());
+        }
     }
     Ok(())
 }
@@ -1097,7 +1354,7 @@ mod tests {
 
     use chromiumoxide::cdp::browser_protocol::{
         fetch::RequestId,
-        network::{LoaderId, RequestId as NetworkRequestId},
+        network::{Headers, LoaderId, RequestId as NetworkRequestId},
     };
     use tempfile::TempDir;
     use url::Url;
@@ -1109,11 +1366,13 @@ mod tests {
 
     use super::{
         Classification, MEDIA_GUARD_BOOTSTRAP, ManagedBrowserConfig, ManagedBrowserSummary,
-        ManualCounts, ManualPageState, ManualPauseLedger, RequestLoaderLedger, ResponsePlan,
-        TargetAction, classification_for, discardable_obsolete_interception,
-        media_block_expression, response_plan, reveal_failure_is_stale, settle_decision,
-        should_reveal, supports_complete_frame_analysis, target_action,
+        ManualCounts, ManualPageState, ManualPauseLedger, PauseStage, RequestLayerOutcome,
+        RequestLoaderLedger, ResponsePlan, TargetAction, classification_for,
+        discardable_obsolete_interception, media_block_expression, network_headers, pause_stage,
+        request_command, response_plan, reveal_failure_is_stale, settle_decision,
+        settle_request_decision, should_reveal, supports_complete_frame_analysis, target_action,
     };
+    use crate::request_policy::RequestDecision;
 
     struct ConfigFixture {
         root: TempDir,
@@ -1309,6 +1568,112 @@ mod tests {
     }
 
     #[test]
+    fn fetch_pause_stage_follows_cdp_presence_semantics() {
+        assert_eq!(pause_stage(None, false), PauseStage::Request);
+        assert_eq!(pause_stage(Some(200), false), PauseStage::Response);
+        assert_eq!(pause_stage(None, true), PauseStage::Response);
+        assert_eq!(pause_stage(Some(500), true), PauseStage::Response);
+    }
+
+    #[test]
+    fn request_commands_fail_domains_and_minimally_override_hardened_requests() {
+        let request = request_id("request-stage");
+        let cases = [
+            (
+                RequestDecision::BlockDomain,
+                serde_json::json!({
+                    "requestId": "request-stage",
+                    "errorReason": "BlockedByClient"
+                }),
+                true,
+            ),
+            (
+                RequestDecision::Continue,
+                serde_json::json!({ "requestId": "request-stage" }),
+                false,
+            ),
+            (
+                RequestDecision::RewriteUrl(
+                    "https://www.google.com/search?q=x&safe=active&ssui=on".to_owned(),
+                ),
+                serde_json::json!({
+                    "requestId": "request-stage",
+                    "url": "https://www.google.com/search?q=x&safe=active&ssui=on"
+                }),
+                false,
+            ),
+            (
+                RequestDecision::ReplaceHeaders(vec![
+                    ("Accept".to_owned(), "text/html".to_owned()),
+                    ("YouTube-Restrict".to_owned(), "Strict".to_owned()),
+                ]),
+                serde_json::json!({
+                    "requestId": "request-stage",
+                    "headers": [
+                        { "name": "Accept", "value": "text/html" },
+                        { "name": "YouTube-Restrict", "value": "Strict" }
+                    ]
+                }),
+                false,
+            ),
+        ];
+
+        for (decision, expected, should_fail) in cases {
+            let command = request_command(request.clone(), decision);
+            assert_eq!(command.is_fail(), should_fail);
+            assert_eq!(command.json(), expected);
+        }
+    }
+
+    #[test]
+    fn request_counts_change_only_after_cdp_settlement_succeeds() {
+        let mut counts = ManualCounts::default();
+        let error =
+            settle_request_decision(RequestLayerOutcome::DomainBlocked, &mut counts, || {
+                anyhow::bail!("CDP broke")
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "CDP broke");
+        assert_eq!(counts, ManualCounts::default());
+
+        for outcome in [
+            RequestLayerOutcome::Continued,
+            RequestLayerOutcome::DomainBlocked,
+            RequestLayerOutcome::SafeSearchRewritten,
+            RequestLayerOutcome::YouTubeRestricted,
+        ] {
+            settle_request_decision(outcome, &mut counts, || Ok(())).unwrap();
+        }
+        assert_eq!(counts.domain_blocked_requests, 1);
+        assert_eq!(counts.safe_search_rewrites, 1);
+        assert_eq!(counts.youtube_restricted_requests, 1);
+    }
+
+    #[test]
+    fn network_headers_are_preserved_only_when_their_shape_is_textual() {
+        let headers = Headers::new(serde_json::json!({
+            "Accept": "text/html",
+            "Cookie": "private=value"
+        }));
+        let mut actual = network_headers(&headers).unwrap();
+        actual.sort();
+        assert_eq!(
+            actual,
+            [
+                ("Accept".to_owned(), "text/html".to_owned()),
+                ("Cookie".to_owned(), "private=value".to_owned()),
+            ]
+        );
+
+        for malformed in [
+            Headers::new(serde_json::json!([])),
+            Headers::new(serde_json::json!({ "Accept": 7 })),
+        ] {
+            assert!(network_headers(&malformed).is_err());
+        }
+    }
+
+    #[test]
     fn classification_allows_only_a_successful_policy_allow() {
         let url = Url::parse("https://example.test/image.png").unwrap();
         let safe = report(Vec::new());
@@ -1472,6 +1837,10 @@ mod tests {
             failed_closed: 1,
             canceled: 1,
             media_blocked_documents: 1,
+            domain_blocked_requests: 2,
+            safe_search_rewrites: 3,
+            youtube_restricted_requests: 4,
+            blocklist_entries: 76_767,
             blocked_extra_pages: 0,
             unresolved: 0,
             clean_shutdown: true,
@@ -1482,17 +1851,21 @@ mod tests {
             object.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "blocked_extra_pages",
+                "blocklist_entries",
                 "canceled",
                 "chromium_version",
                 "clean_shutdown",
                 "continued",
+                "domain_blocked_requests",
                 "failed_closed",
                 "intercepted",
                 "media_blocked_documents",
                 "model_sha256",
                 "onnx_runtime_version",
                 "replaced",
+                "safe_search_rewrites",
                 "unresolved",
+                "youtube_restricted_requests",
             ]
         );
         assert!(!value.to_string().contains("http"));
