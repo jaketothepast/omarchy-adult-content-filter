@@ -2,6 +2,7 @@
 
 pub mod benchmark;
 pub mod browser;
+pub mod domain_policy;
 pub mod fixture;
 pub mod inference;
 pub mod managed;

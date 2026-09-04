@@ -12,9 +12,14 @@
         url = "https://raw.githubusercontent.com/notAI-tech/NudeNet/6ccc81c6c305cccfd46d92b414f8a5c0a816574d/nudenet/320n.onnx";
         hash = "sha256-wV2Cc62tLQqS8BTMaastbDEaBnd6VVRfLE60b1GRHw8=";
       };
+      adultDomains = pkgs.fetchurl {
+        url = "https://raw.githubusercontent.com/StevenBlack/hosts/2bb49d741a2c9b922b0ed59be6c28ce543bed81b/alternates/porn-only/hosts";
+        hash = "sha256-pRLCgV/mEvpO7ox7Hi2rF/ejkBZInqs+O7zEB+209RQ=";
+      };
       environment = {
         ORT_DYLIB_PATH = "${pkgs.onnxruntime}/lib/libonnxruntime.so.${pkgs.onnxruntime.version}";
         NUDENET_MODEL_PATH = model;
+        OMARCHY_KIDS_BLOCKLIST_PATH = adultDomains;
         CHROMIUM_BIN = "${pkgs.chromium}/bin/chromium";
         OMARCHY_KIDS_EXTENSION_DIR = ./browser-extension;
       };
@@ -34,6 +39,7 @@
           runHook preCheck
           export ORT_DYLIB_PATH=${environment.ORT_DYLIB_PATH}
           export NUDENET_MODEL_PATH=${environment.NUDENET_MODEL_PATH}
+          export OMARCHY_KIDS_BLOCKLIST_PATH=${environment.OMARCHY_KIDS_BLOCKLIST_PATH}
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
@@ -43,6 +49,7 @@
           wrapProgram $out/bin/omarchy-kids-browser-filter \
             --set ORT_DYLIB_PATH ${environment.ORT_DYLIB_PATH} \
             --set NUDENET_MODEL_PATH ${environment.NUDENET_MODEL_PATH} \
+            --set OMARCHY_KIDS_BLOCKLIST_PATH ${environment.OMARCHY_KIDS_BLOCKLIST_PATH} \
             --set CHROMIUM_BIN ${environment.CHROMIUM_BIN} \
             --set OMARCHY_KIDS_EXTENSION_DIR ${environment.OMARCHY_KIDS_EXTENSION_DIR}
         '';
@@ -59,6 +66,7 @@
         text = ''
           export ORT_DYLIB_PATH=${environment.ORT_DYLIB_PATH}
           export NUDENET_MODEL_PATH=${environment.NUDENET_MODEL_PATH}
+          export OMARCHY_KIDS_BLOCKLIST_PATH=${environment.OMARCHY_KIDS_BLOCKLIST_PATH}
           cargo fmt --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
