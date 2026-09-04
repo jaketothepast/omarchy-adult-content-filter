@@ -510,33 +510,6 @@ mod tests {
         );
     }
 
-    // Production mutation caught: deriving runtime identity from a selected path's file name
-    // would report this deliberately misleading 9.8.7 label instead of the library's own 1.27.1.
-    #[test]
-    fn detector_metadata_uses_runtime_reported_version_not_library_filename() {
-        let source_runtime = std::env::var_os("ORT_DYLIB_PATH").unwrap();
-        let model_path = std::env::var_os("NUDENET_MODEL_PATH").unwrap().into();
-        let temporary_directory = tempfile::tempdir().unwrap();
-        let misleading_runtime = temporary_directory.path().join("libonnxruntime.so.9.8.7");
-        if fs::hard_link(&source_runtime, &misleading_runtime).is_err() {
-            fs::copy(&source_runtime, &misleading_runtime).unwrap();
-        }
-
-        let detector = Detector::load(ModelConfig {
-            model_path,
-            runtime_path: misleading_runtime.clone(),
-            max_encoded_bytes: DEFAULT_MAX_ENCODED_BYTES,
-            max_pixels: DEFAULT_MAX_PIXELS,
-        })
-        .unwrap();
-
-        assert_eq!(
-            detector.metadata().runtime_path,
-            misleading_runtime.canonicalize().unwrap()
-        );
-        assert_eq!(detector.metadata().runtime_version, "1.27.1");
-    }
-
     // Production mutation caught: changing the tensor shape, channel order, anchor, padding,
     // normalization, or original-dimension metadata breaks the pinned preprocessing contract.
     #[test]

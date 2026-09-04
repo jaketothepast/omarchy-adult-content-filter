@@ -251,6 +251,48 @@ impl InferenceWorker {
     }
 }
 
+struct HeadedDetectorSession {
+    metadata: DetectorMetadata,
+    worker: InferenceWorker,
+}
+
+impl HeadedDetectorSession {
+    fn start(detector: Detector) -> Self {
+        let metadata = detector.metadata().clone();
+        let worker = InferenceWorker::start(detector);
+        Self { metadata, worker }
+    }
+
+    async fn detect(&self, encoded: Vec<u8>, deadline: Duration) -> Result<InferenceReport> {
+        self.worker.detect(encoded, deadline).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn summary(
+        &self,
+        chromium_version: String,
+        counts: RunCounts,
+        unresolved: usize,
+        reveal_latency_millis: u64,
+        no_flash_assertion: Option<NoFlashAssertionSummary>,
+        dom_images: Vec<DomImageMetadata>,
+    ) -> ExperimentSummary {
+        experiment_summary(
+            chromium_version,
+            &self.metadata,
+            counts,
+            unresolved,
+            reveal_latency_millis,
+            no_flash_assertion,
+            dom_images,
+        )
+    }
+
+    async fn shutdown(self, deadline: Duration) -> Result<()> {
+        self.worker.shutdown(deadline).await
+    }
+}
+
 async fn run_inference_worker(
     mut detector: Detector,
     mut receiver: mpsc::Receiver<InferenceJob>,
@@ -277,7 +319,6 @@ async fn run_experiment<W: std::io::Write>(
         policy,
         mut metrics,
     } = experiment;
-    let detector_metadata = detector.metadata().clone();
     let browser_config = BrowserConfig::builder()
         .chrome_executable(&config.chromium_bin)
         .with_head()
@@ -290,7 +331,7 @@ async fn run_experiment<W: std::io::Write>(
         .disable_cache()
         .build()
         .map_err(anyhow::Error::msg)?;
-    let worker = InferenceWorker::start(detector);
+    let detector_session = HeadedDetectorSession::start(detector);
     let mut metric_buffer = MetricBuffer::default();
 
     let launch = Browser::launch(browser_config).await;
@@ -299,17 +340,16 @@ async fn run_experiment<W: std::io::Write>(
             run_with_browser(
                 browser,
                 handler,
-                &worker,
+                &detector_session,
                 &policy,
                 &mut metric_buffer,
                 &config,
-                &detector_metadata,
             )
             .await
         }
         Err(error) => Err(error).context("failed to launch headed Chromium"),
     };
-    let worker_result = worker.shutdown(config.inference_timeout).await;
+    let worker_result = detector_session.shutdown(config.inference_timeout).await;
     let metrics_result = flush_metrics(metric_buffer, &mut metrics);
 
     let mut summary = None;
@@ -334,11 +374,10 @@ async fn run_experiment<W: std::io::Write>(
 async fn run_with_browser(
     mut browser: Browser,
     mut handler: chromiumoxide::Handler,
-    worker: &InferenceWorker,
+    detector_session: &HeadedDetectorSession,
     policy: &Policy,
     metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
-    detector_metadata: &DetectorMetadata,
 ) -> Result<ExperimentSummary> {
     let handler_task = tokio::spawn(async move {
         while let Some(event) = handler.next().await {
@@ -351,11 +390,10 @@ async fn run_with_browser(
         config.navigation_timeout,
         run_page(
             &browser,
-            worker,
+            detector_session,
             policy,
             metrics,
             config,
-            detector_metadata,
             Arc::clone(&ledger),
         ),
     )
@@ -766,11 +804,10 @@ where
 
 async fn run_page(
     browser: &Browser,
-    worker: &InferenceWorker,
+    detector_session: &HeadedDetectorSession,
     policy: &Policy,
     metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
-    detector_metadata: &DetectorMetadata,
     ledger: Arc<Mutex<PauseLedger>>,
 ) -> Result<ExperimentSummary> {
     let page = tokio::time::timeout(config.acquisition_timeout, browser.new_page("about:blank"))
@@ -817,7 +854,7 @@ async fn run_page(
                 let outcome = process_pause(
                     &page,
                     event.as_ref(),
-                    worker,
+                    detector_session,
                     policy,
                     metrics,
                     config,
@@ -906,9 +943,8 @@ async fn run_page(
     assert_dom_image_colors(&dom_images, expected_flagged_index)?;
     let no_flash_assertion = no_flash.map(NoFlashCapture::into_summary).transpose()?;
 
-    Ok(experiment_summary(
+    Ok(detector_session.summary(
         chromium_version,
-        detector_metadata,
         counts,
         ledger
             .lock()
@@ -985,7 +1021,7 @@ fn flush_metrics<W: std::io::Write>(metrics: MetricBuffer, sink: &mut MetricSink
 async fn process_pause(
     page: &Page,
     event: &EventRequestPaused,
-    worker: &InferenceWorker,
+    detector_session: &HeadedDetectorSession,
     policy: &Policy,
     metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
@@ -999,7 +1035,7 @@ async fn process_pause(
         .begin(&event.request_id)?;
     counts.intercepted += 1;
 
-    let prepared = prepare_decision(page, event, worker, policy, config).await;
+    let prepared = prepare_decision(page, event, detector_session, policy, config).await;
     let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1077,7 +1113,7 @@ async fn process_pause(
 async fn prepare_decision(
     page: &Page,
     event: &EventRequestPaused,
-    worker: &InferenceWorker,
+    detector_session: &HeadedDetectorSession,
     policy: &Policy,
     config: &ExperimentConfig,
 ) -> Result<PreparedDecision> {
@@ -1111,7 +1147,9 @@ async fn prepare_decision(
     .context("failed to acquire intercepted response body")?
     .result;
     let encoded = decode_response_body(&body.body, body.base64_encoded, DEFAULT_MAX_ENCODED_BYTES)?;
-    let report = worker.detect(encoded, config.inference_timeout).await?;
+    let report = detector_session
+        .detect(encoded, config.inference_timeout)
+        .await?;
     let fixture_index = fixture_index(&request_url)?;
     let inference_elapsed = report
         .decode_micros
@@ -1362,8 +1400,8 @@ impl PauseLedger {
 mod tests {
     use std::{
         fs,
-        io::Write,
-        path::{Path, PathBuf},
+        io::{Cursor, Write},
+        path::Path,
         time::{Duration, Instant},
     };
 
@@ -1377,29 +1415,51 @@ mod tests {
     use url::Url;
 
     use super::{
-        CleanupOperations, DomImageMetadata, ExperimentConfig, MAX_OPERATION_TIMEOUT, MetricBuffer,
-        PauseLedger, RunCounts, ValidatedRevealLatency, assert_cover_screenshot,
-        assert_dom_image_colors, assert_reveal_screenshot, continue_response, decode_response_body,
-        experiment_summary, fetch_enable_params, finish_response_after_cdp,
+        CleanupOperations, DomImageMetadata, ExperimentConfig, HeadedDetectorSession,
+        MAX_OPERATION_TIMEOUT, MetricBuffer, PauseLedger, RunCounts, ValidatedRevealLatency,
+        assert_cover_screenshot, assert_dom_image_colors, assert_reveal_screenshot,
+        continue_response, decode_response_body, fetch_enable_params, finish_response_after_cdp,
         finish_reveal_after_response, flush_metrics, perform_cleanup, replacement_headers,
         replacement_response, resolve_and_buffer_metrics, response_requires_body,
     };
-    use crate::inference::DetectorMetadata;
+    use crate::inference::{
+        DEFAULT_MAX_ENCODED_BYTES, DEFAULT_MAX_PIXELS, Detector, MODEL_SHA256, ModelConfig,
+    };
     use crate::metrics::{MetricRecord, MetricSink, MetricStage, MetricVerdict};
 
-    // Production mutation caught: deriving runtime identity from a versioned library filename
-    // would misreport the detector session when the loaded runtime API reports a different value.
-    #[test]
-    fn headed_summary_uses_detector_reported_identity() {
-        let metadata = DetectorMetadata {
-            model_sha256: "detector-model-sha256".to_owned(),
-            runtime_path: PathBuf::from("/runtime/libonnxruntime.so.99.0.0"),
-            runtime_version: "1.27.1".to_owned(),
-        };
+    // Production mutations caught: deriving runtime identity from a selected library filename, or
+    // losing the cloned identity when moving the exact Detector into its worker, would misreport a
+    // successful headed session even though the loaded runtime API reports a different version.
+    #[tokio::test]
+    async fn headed_summary_uses_detector_reported_identity() {
+        let source_runtime = std::env::var_os("ORT_DYLIB_PATH").unwrap();
+        let model_path = std::env::var_os("NUDENET_MODEL_PATH").unwrap().into();
+        let temporary_directory = tempdir().unwrap();
+        let misleading_runtime = temporary_directory.path().join("libonnxruntime.so.9.8.7");
+        if fs::hard_link(&source_runtime, &misleading_runtime).is_err() {
+            fs::copy(&source_runtime, &misleading_runtime).unwrap();
+        }
+        let detector = Detector::load(ModelConfig {
+            model_path,
+            runtime_path: misleading_runtime,
+            max_encoded_bytes: DEFAULT_MAX_ENCODED_BYTES,
+            max_pixels: DEFAULT_MAX_PIXELS,
+        })
+        .unwrap();
+        let session = HeadedDetectorSession::start(detector);
 
-        let summary = experiment_summary(
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])))
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let report = session
+            .detect(encoded.into_inner(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!((report.width, report.height), (1, 1));
+
+        let summary = session.summary(
             "Chromium 140".to_owned(),
-            &metadata,
             RunCounts::default(),
             0,
             125,
@@ -1409,8 +1469,9 @@ mod tests {
         let value = serde_json::to_value(summary).unwrap();
 
         assert_eq!(value["onnx_runtime_version"], "1.27.1");
-        assert_eq!(value["model_sha256"], "detector-model-sha256");
+        assert_eq!(value["model_sha256"], MODEL_SHA256);
         assert!(value.get("runtime_path").is_none());
+        session.shutdown(Duration::from_secs(5)).await.unwrap();
     }
 
     // Production mutation caught: adding permissions, executable resources, undeclared files, or
