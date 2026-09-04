@@ -1075,6 +1075,223 @@ fn kids_iso_test_refuses_an_existing_base_without_explicit_reuse() {
     assert_eq!(fs::read_to_string(base).unwrap(), "preserved base");
 }
 
+// Production mutations caught: omitting either consumer suffix or deriving suffixes in argument
+// order guards the wrong path and exposes the selected encrypted/provisioned base to a fresh install.
+#[test]
+fn kids_iso_test_refuses_each_existing_mode_specific_base_without_reuse() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    let iso = fixture.path().join("kids-demo.iso");
+    write_file(&iso, "fixture");
+    let package_source = fixture.path().join("package source");
+    fs::create_dir(&package_source).unwrap();
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-test"),
+        "printf 'delegated\\n'\nprintf 'overwritten base' >\"$BASE_TO_MUTATE\"\n",
+    );
+    let cases: &[(&[&str], &str)] = &[
+        (&["--encrypt"], "kids-demo-encrypted"),
+        (&["--provision"], "kids-demo-provision"),
+        (
+            &["--provision", "--encrypt"],
+            "kids-demo-encrypted-provision",
+        ),
+    ];
+
+    for (mode_arguments, base_name) in cases {
+        let base = workspace
+            .iso
+            .join("test-runs")
+            .join(base_name)
+            .join("base.qcow2");
+        write_file(&base, "preserved mode base");
+        let mut arguments = vec![iso.to_str().unwrap()];
+        arguments.extend_from_slice(mode_arguments);
+
+        let output = run_wrapper(
+            "kids-iso-test",
+            &workspace,
+            &arguments,
+            &[
+                ("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path()),
+                ("BASE_TO_MUTATE", base.as_path()),
+            ],
+        );
+
+        assert!(
+            !output.status.success(),
+            "mode {mode_arguments:?} delegated a fresh install"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "ISO harness was delegated to for mode {mode_arguments:?}"
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "ERROR kids-iso-test: reusable base already exists: {}\nUse --reuse-base to use it, or build a uniquely tagged ISO.\n",
+                base.display()
+            )
+        );
+        assert_eq!(fs::read_to_string(base).unwrap(), "preserved mode base");
+    }
+}
+
+// Production mutation caught: deriving the safety path must not reorder, consume, or omit valid
+// mode arguments when no preserved base blocks delegation.
+#[test]
+fn kids_iso_test_delegates_each_mode_with_exact_original_arguments_when_no_base_exists() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    let iso = fixture.path().join("kids-demo.iso");
+    write_file(&iso, "fixture");
+    let package_source = fixture.path().join("package source");
+    fs::create_dir(&package_source).unwrap();
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-test"),
+        "printf 'ARG=%s\\n' \"$@\"\n",
+    );
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["--encrypt"], &["ARG=--encrypt"]),
+        (&["--provision"], &["ARG=--provision"]),
+        (
+            &["--provision", "--encrypt"],
+            &["ARG=--provision", "ARG=--encrypt"],
+        ),
+    ];
+
+    for (mode_arguments, expected_mode_lines) in cases {
+        let mut arguments = vec![iso.to_str().unwrap()];
+        arguments.extend_from_slice(mode_arguments);
+        arguments.push("--no-preview");
+
+        let output = run_wrapper(
+            "kids-iso-test",
+            &workspace,
+            &arguments,
+            &[("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path())],
+        );
+
+        assert!(
+            output.status.success(),
+            "mode {mode_arguments:?} was not delegated: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut expected = vec![
+            format!("ARG={}", iso.display()),
+            "ARG=--external-acceptance".to_owned(),
+            format!("ARG={}", package_source.display()),
+        ];
+        expected.extend(expected_mode_lines.iter().map(|line| (*line).to_owned()));
+        expected.push("ARG=--no-preview".to_owned());
+        assert_eq!(stdout_lines(&output), expected);
+    }
+}
+
+// Production mutation caught: mode suffix handling must not turn a genuine reuse request into a
+// fresh-install refusal or change the selected mode-specific base bytes.
+#[test]
+fn kids_iso_test_preserves_each_mode_specific_base_with_genuine_reuse() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    let iso = fixture.path().join("kids-demo.iso");
+    write_file(&iso, "fixture");
+    let package_source = fixture.path().join("package source");
+    fs::create_dir(&package_source).unwrap();
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-test"),
+        "printf 'delegated\\n'\n",
+    );
+    let cases: &[(&[&str], &str)] = &[
+        (&["--encrypt"], "kids-demo-encrypted"),
+        (&["--provision"], "kids-demo-provision"),
+        (
+            &["--provision", "--encrypt"],
+            "kids-demo-encrypted-provision",
+        ),
+    ];
+
+    for (mode_arguments, base_name) in cases {
+        let base = workspace
+            .iso
+            .join("test-runs")
+            .join(base_name)
+            .join("base.qcow2");
+        write_file(&base, "preserved reusable mode base");
+        let mut arguments = vec![iso.to_str().unwrap()];
+        arguments.extend_from_slice(mode_arguments);
+        arguments.push("--reuse-base");
+
+        let output = run_wrapper(
+            "kids-iso-test",
+            &workspace,
+            &arguments,
+            &[("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path())],
+        );
+
+        assert!(
+            output.status.success(),
+            "mode {mode_arguments:?} reuse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(stdout_lines(&output), ["delegated"]);
+        assert_eq!(
+            fs::read_to_string(base).unwrap(),
+            "preserved reusable mode base"
+        );
+    }
+}
+
+// Production mutation caught: accepting the consumer's later positional replacement silently
+// changes which ISO/base a wrapper invocation can install over after guarding only the first ISO.
+#[test]
+fn kids_iso_test_rejects_a_later_positional_iso_without_delegating_or_mutating_its_base() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    let iso = fixture.path().join("kids-demo.iso");
+    write_file(&iso, "fixture");
+    let alternate_iso = fixture.path().join("alternate demo.iso");
+    write_file(&alternate_iso, "alternate fixture");
+    let package_source = fixture.path().join("package source");
+    fs::create_dir(&package_source).unwrap();
+    let alternate_base = workspace.iso.join("test-runs/alternate demo/base.qcow2");
+    write_file(&alternate_base, "preserved alternate base");
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-test"),
+        "printf 'delegated\\n'\nprintf 'overwritten base' >\"$BASE_TO_MUTATE\"\n",
+    );
+
+    let output = run_wrapper(
+        "kids-iso-test",
+        &workspace,
+        &[
+            iso.to_str().unwrap(),
+            "--memory",
+            "4096",
+            alternate_iso.to_str().unwrap(),
+            "--reuse-base",
+        ],
+        &[
+            ("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path()),
+            ("BASE_TO_MUTATE", alternate_base.as_path()),
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "ISO harness was delegated to");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "ERROR kids-iso-test: unexpected extra ISO argument: {}\n",
+            alternate_iso.display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(alternate_base).unwrap(),
+        "preserved alternate base"
+    );
+}
+
 // Production mutation caught: token-scanning all forwarded arguments mistakes a value-position
 // `--reuse-base` for the real zero-arity flag and can expose preserved installation evidence to a
 // fresh install.
