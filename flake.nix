@@ -51,6 +51,7 @@
         runtimeInputs = [
           pkgs.cargo
           pkgs.clippy
+          pkgs.git
           pkgs.rustfmt
         ];
         text = ''
