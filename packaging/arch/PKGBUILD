@@ -1,0 +1,84 @@
+pkgname=omarchy-adult-content-filter
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Supervised managed Chromium with layered adult-content filtering for Omarchy'
+arch=('x86_64')
+url='https://github.com/jaketothepast/omarchy-adult-content-filter'
+license=('AGPL-3.0-only')
+depends=('bash' 'chromium' 'coreutils' 'gcc-libs' 'glibc')
+makedepends=('cargo')
+options=('!debug')
+_onnxruntime_version=1.27.1
+source=(
+  "onnxruntime-linux-x64-${_onnxruntime_version}.tgz::https://github.com/microsoft/onnxruntime/releases/download/v${_onnxruntime_version}/onnxruntime-linux-x64-${_onnxruntime_version}.tgz"
+  '320n.onnx::https://raw.githubusercontent.com/notAI-tech/NudeNet/6ccc81c6c305cccfd46d92b414f8a5c0a816574d/nudenet/320n.onnx'
+  'nudenet-LICENSE::https://raw.githubusercontent.com/notAI-tech/NudeNet/6ccc81c6c305cccfd46d92b414f8a5c0a816574d/LICENSE'
+  'nudenet-setup.py::https://raw.githubusercontent.com/notAI-tech/NudeNet/6ccc81c6c305cccfd46d92b414f8a5c0a816574d/setup.py'
+  'adult-domains.hosts::https://raw.githubusercontent.com/StevenBlack/hosts/2bb49d741a2c9b922b0ed59be6c28ce543bed81b/alternates/porn-only/hosts'
+  'stevenblack-license.txt::https://raw.githubusercontent.com/StevenBlack/hosts/2bb49d741a2c9b922b0ed59be6c28ce543bed81b/license.txt'
+)
+sha256sums=(
+  '25b1ef1fea1acd210d63f8f24dc870ad6e077795ce1f54876252c6d3803c15af'
+  'c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f'
+  '8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef'
+  'acef07396af96db42374fc2f26799111d0989873f00da5494ac54a0ecf83ff09'
+  'a512c2815fe612fa4eee8c7b1e2dab17f7a39016489eab3e3bbcc407edb4f514'
+  '8e52717212b5051232dd31fb2247310bd91d5295eaab380dbea6454d0268443b'
+)
+
+prepare() {
+  if [[ ! -d ${OMARCHY_LOCAL_PACKAGE_SRC:-} ]]; then
+    echo 'OMARCHY_LOCAL_PACKAGE_SRC must identify the Git-indexed adult-content-filter source snapshot' >&2
+    return 1
+  fi
+
+  rm -rf "$srcdir/omarchy-adult-content-filter"
+  mkdir -p "$srcdir/omarchy-adult-content-filter"
+  cp -a "$OMARCHY_LOCAL_PACKAGE_SRC/." "$srcdir/omarchy-adult-content-filter/"
+  chmod -R u+w "$srcdir/omarchy-adult-content-filter"
+
+  cd "$srcdir/omarchy-adult-content-filter"
+  cargo fetch --locked
+}
+
+build() {
+  cd "$srcdir/omarchy-adult-content-filter"
+  cargo build --frozen --release -p omarchy-kids-browser-filter
+}
+
+check() {
+  cd "$srcdir/omarchy-adult-content-filter"
+  export ORT_DYLIB_PATH="$srcdir/onnxruntime-linux-x64-${_onnxruntime_version}/lib/libonnxruntime.so.${_onnxruntime_version}"
+  export NUDENET_MODEL_PATH="$srcdir/320n.onnx"
+  export OMARCHY_KIDS_BLOCKLIST_PATH="$srcdir/adult-domains.hosts"
+
+  cargo test --frozen --release -p omarchy-kids-browser-filter --lib
+  cargo test --frozen --release -p omarchy-kids-browser-filter --test infer_cli
+}
+
+package() {
+  local private_lib="$pkgdir/usr/lib/$pkgname"
+  local private_share="$pkgdir/usr/share/$pkgname"
+  local license_dir="$pkgdir/usr/share/licenses/$pkgname"
+
+  install -Dm755 "$srcdir/omarchy-adult-content-filter/target/release/omarchy-kids-browser-filter" "$private_lib/omarchy-adult-content-filter"
+  install -Dm755 "$srcdir/omarchy-adult-content-filter/packaging/arch/omarchy-adult-content-filter" "$pkgdir/usr/bin/omarchy-adult-content-filter"
+  install -Dm644 "$srcdir/omarchy-adult-content-filter/packaging/arch/omarchy-adult-content-filter.desktop" "$pkgdir/usr/share/applications/omarchy-adult-content-filter.desktop"
+
+  install -Dm644 "$srcdir/omarchy-adult-content-filter/browser-extension/manifest.json" "$private_share/browser-extension/manifest.json"
+  install -Dm644 "$srcdir/omarchy-adult-content-filter/browser-extension/cover.css" "$private_share/browser-extension/cover.css"
+  install -Dm644 "$srcdir/320n.onnx" "$private_share/models/320n.onnx"
+  install -Dm644 "$srcdir/adult-domains.hosts" "$private_share/policies/adult-domains.hosts"
+
+  install -Dm755 "$srcdir/onnxruntime-linux-x64-${_onnxruntime_version}/lib/libonnxruntime.so.${_onnxruntime_version}" "$private_lib/onnxruntime/libonnxruntime.so.${_onnxruntime_version}"
+  ln -s "libonnxruntime.so.${_onnxruntime_version}" "$private_lib/onnxruntime/libonnxruntime.so.1"
+  ln -s libonnxruntime.so.1 "$private_lib/onnxruntime/libonnxruntime.so"
+
+  install -Dm644 "$srcdir/omarchy-adult-content-filter/LICENSE" "$license_dir/LICENSE"
+  install -Dm644 "$srcdir/onnxruntime-linux-x64-${_onnxruntime_version}/LICENSE" "$license_dir/onnxruntime-LICENSE"
+  install -Dm644 "$srcdir/onnxruntime-linux-x64-${_onnxruntime_version}/ThirdPartyNotices.txt" "$license_dir/onnxruntime-ThirdPartyNotices.txt"
+  install -Dm644 "$srcdir/omarchy-adult-content-filter/packaging/NOTICES.md" "$license_dir/NOTICES.md"
+  install -Dm644 "$srcdir/nudenet-LICENSE" "$license_dir/nudenet-LICENSE"
+  install -Dm644 "$srcdir/nudenet-setup.py" "$license_dir/nudenet-setup.py"
+  install -Dm644 "$srcdir/stevenblack-license.txt" "$license_dir/stevenblack-license.txt"
+}

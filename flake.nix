@@ -61,6 +61,7 @@
           pkgs.clippy
           pkgs.git
           pkgs.jq
+          pkgs.libarchive
           pkgs.nodejs
           pkgs.ripgrep
           pkgs.rustfmt
@@ -75,6 +76,8 @@
           cargo test --workspace
           node plugin/tests/runtime-model-test.js
           bash tests/plugin-runtime-contract.sh
+          bash tests/plugin-bundle-contract.sh
+          bash tests/managed-package-recipe-contract.sh
         '';
       };
     in

@@ -1,0 +1,145 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly PATH=/usr/bin
+export PATH
+umask 077
+
+[[ $# -eq 1 ]] || {
+  printf 'usage: %s /absolute/path/to/omarchy-adult-content-filter.pkg.tar.zst\n' "${0##*/}" >&2
+  exit 64
+}
+
+package=$1
+[[ $package == /* && -f $package && ! -L $package ]] || {
+  printf 'package must be an absolute regular file\n' >&2
+  exit 66
+}
+package=$(/usr/bin/readlink -f -- "$package")
+
+script_dir=${BASH_SOURCE[0]%/*}
+root=$(cd -P -- "$script_dir/.." && pwd -P)
+stage=$(/usr/bin/mktemp -d -- "$root/.bundle-stage.XXXXXX")
+cleanup() {
+  /usr/bin/rm -rf -- "$stage"
+}
+trap cleanup EXIT
+
+archive_paths="$stage/archive-paths"
+/usr/bin/bsdtar -tf "$package" >"$archive_paths"
+while IFS= read -r archive_path; do
+  normalized=${archive_path#./}
+  [[ $normalized != /* && $normalized != ".." && $normalized != ../* && $normalized != */../* && $normalized != */.. ]] || {
+    printf 'package contains an unsafe path: %s\n' "$archive_path" >&2
+    exit 78
+  }
+done <"$archive_paths"
+
+extracted="$stage/extracted"
+/usr/bin/mkdir -p -- "$extracted"
+/usr/bin/bsdtar -xf "$package" -C "$extracted"
+
+expected_package_paths="$stage/expected-package-paths"
+cat >"$expected_package_paths" <<'EOF'
+.BUILDINFO
+.MTREE
+.PKGINFO
+usr/bin/omarchy-adult-content-filter
+usr/lib/omarchy-adult-content-filter/omarchy-adult-content-filter
+usr/lib/omarchy-adult-content-filter/onnxruntime/libonnxruntime.so
+usr/lib/omarchy-adult-content-filter/onnxruntime/libonnxruntime.so.1
+usr/lib/omarchy-adult-content-filter/onnxruntime/libonnxruntime.so.1.27.1
+usr/share/applications/omarchy-adult-content-filter.desktop
+usr/share/licenses/omarchy-adult-content-filter/LICENSE
+usr/share/licenses/omarchy-adult-content-filter/NOTICES.md
+usr/share/licenses/omarchy-adult-content-filter/nudenet-LICENSE
+usr/share/licenses/omarchy-adult-content-filter/nudenet-setup.py
+usr/share/licenses/omarchy-adult-content-filter/onnxruntime-LICENSE
+usr/share/licenses/omarchy-adult-content-filter/onnxruntime-ThirdPartyNotices.txt
+usr/share/licenses/omarchy-adult-content-filter/stevenblack-license.txt
+usr/share/omarchy-adult-content-filter/browser-extension/cover.css
+usr/share/omarchy-adult-content-filter/browser-extension/manifest.json
+usr/share/omarchy-adult-content-filter/models/320n.onnx
+usr/share/omarchy-adult-content-filter/policies/adult-domains.hosts
+EOF
+actual_package_paths="$stage/actual-package-paths"
+/usr/bin/find "$extracted" \( -type f -o -type l \) -printf '%P\n' | LC_ALL=C /usr/bin/sort >"$actual_package_paths"
+LC_ALL=C /usr/bin/sort -o "$expected_package_paths" "$expected_package_paths"
+if ! /usr/bin/cmp -s -- "$expected_package_paths" "$actual_package_paths"; then
+  /usr/bin/diff -u -- "$expected_package_paths" "$actual_package_paths" >&2 || true
+  printf 'package content does not match the runtime source allowlist\n' >&2
+  exit 78
+fi
+
+/usr/bin/grep -Fxq 'pkgname = omarchy-adult-content-filter' "$extracted/.PKGINFO" || {
+  printf 'package identity is not omarchy-adult-content-filter\n' >&2
+  exit 78
+}
+/usr/bin/grep -Fxq 'pkgver = 0.1.0-1' "$extracted/.PKGINFO" || {
+  printf 'package version is not 0.1.0-1\n' >&2
+  exit 78
+}
+/usr/bin/grep -Fxq 'arch = x86_64' "$extracted/.PKGINFO" || {
+  printf 'package architecture is not x86_64\n' >&2
+  exit 78
+}
+/usr/bin/grep -Fxq 'license = AGPL-3.0-only' "$extracted/.PKGINFO" || {
+  printf 'package source license is not AGPL-3.0-only\n' >&2
+  exit 78
+}
+
+package_lib="$extracted/usr/lib/omarchy-adult-content-filter"
+package_share="$extracted/usr/share/omarchy-adult-content-filter"
+package_licenses="$extracted/usr/share/licenses/omarchy-adult-content-filter"
+[[ -L $package_lib/onnxruntime/libonnxruntime.so.1 \
+  && $(/usr/bin/readlink -- "$package_lib/onnxruntime/libonnxruntime.so.1") == "libonnxruntime.so.1.27.1" \
+  && -L $package_lib/onnxruntime/libonnxruntime.so \
+  && $(/usr/bin/readlink -- "$package_lib/onnxruntime/libonnxruntime.so") == "libonnxruntime.so.1" ]] || {
+  printf 'package ONNX Runtime links are invalid\n' >&2
+  exit 78
+}
+
+next="$stage/runtime"
+/usr/bin/install -Dm755 "$package_lib/omarchy-adult-content-filter" "$next/bin/omarchy-adult-content-filter"
+/usr/bin/install -Dm755 "$package_lib/onnxruntime/libonnxruntime.so.1.27.1" "$next/lib/onnxruntime/libonnxruntime.so.1.27.1"
+/usr/bin/ln -s libonnxruntime.so.1.27.1 "$next/lib/onnxruntime/libonnxruntime.so.1"
+/usr/bin/ln -s libonnxruntime.so.1 "$next/lib/onnxruntime/libonnxruntime.so"
+/usr/bin/install -Dm644 "$package_share/browser-extension/manifest.json" "$next/share/browser-extension/manifest.json"
+/usr/bin/install -Dm644 "$package_share/browser-extension/cover.css" "$next/share/browser-extension/cover.css"
+/usr/bin/install -Dm644 "$package_share/models/320n.onnx" "$next/share/models/320n.onnx"
+/usr/bin/install -Dm644 "$package_share/policies/adult-domains.hosts" "$next/share/policies/adult-domains.hosts"
+for license_file in \
+  LICENSE \
+  NOTICES.md \
+  nudenet-LICENSE \
+  nudenet-setup.py \
+  onnxruntime-LICENSE \
+  onnxruntime-ThirdPartyNotices.txt \
+  stevenblack-license.txt; do
+  /usr/bin/install -Dm644 "$package_licenses/$license_file" "$next/share/licenses/$license_file"
+done
+
+(
+  cd -- "$next"
+  /usr/bin/find . -type f ! -name SHA256SUMS -printf '%P\0' \
+    | LC_ALL=C /usr/bin/sort -z \
+    | /usr/bin/xargs -0 /usr/bin/sha256sum >SHA256SUMS
+  /usr/bin/sha256sum --check --strict --quiet SHA256SUMS
+)
+
+previous="$stage/previous-runtime"
+if [[ -e $root/runtime ]]; then
+  [[ -d $root/runtime && ! -L $root/runtime ]] || {
+    printf 'existing runtime is not a replaceable directory\n' >&2
+    exit 78
+  }
+  /usr/bin/mv -- "$root/runtime" "$previous"
+fi
+if ! /usr/bin/mv -- "$next" "$root/runtime"; then
+  [[ ! -e $previous ]] || /usr/bin/mv -- "$previous" "$root/runtime"
+  printf 'failed to publish the verified runtime bundle\n' >&2
+  exit 74
+fi
+/usr/bin/rm -rf -- "$previous"
+printf 'bundled runtime from %s\n' "$package"

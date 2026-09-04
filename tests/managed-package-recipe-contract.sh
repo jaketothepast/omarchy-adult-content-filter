@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-recipe=${1:-/home/jake/Projects/omarchy-pkgs/pkgbuilds/omarchy-adult-content-filter/PKGBUILD}
+ROOT=$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)
+recipe=${1:-$ROOT/packaging/arch/PKGBUILD}
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -17,6 +18,8 @@ source "$recipe"
 
 [[ $pkgname == omarchy-adult-content-filter ]] || fail "package identity is exact"
 [[ $pkgver == 0.1.0 && $pkgrel == 1 ]] || fail "package version is exact"
+[[ $url == https://github.com/jaketothepast/omarchy-adult-content-filter ]] || fail "package URL is public repository"
+[[ ${license[*]} == AGPL-3.0-only ]] || fail "package source license is AGPL-3.0-only"
 [[ ${depends[*]} == 'bash chromium coreutils gcc-libs glibc' ]] || fail "runtime dependencies are exact"
 [[ ${makedepends[*]} == cargo ]] || fail "build dependencies are exact"
 [[ ${options[*]} == '!debug' ]] || fail "debug split package is disabled"
@@ -47,6 +50,7 @@ for required in \
   'packaging/arch/omarchy-adult-content-filter.desktop' \
   'browser-extension/manifest.json' \
   'browser-extension/cover.css' \
+  '$license_dir/LICENSE' \
   'policies/adult-domains.hosts' \
   '$license_dir/stevenblack-license.txt'; do
   [[ $recipe_text == *"$required"* ]] || fail "package installs $required"

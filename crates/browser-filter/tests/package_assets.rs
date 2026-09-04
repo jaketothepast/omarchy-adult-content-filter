@@ -217,22 +217,21 @@ fn adult_content_filter_desktop_entry_is_opt_in_and_not_a_default_handler() {
     assert!(entry.get("X-GNOME-Autostart-enabled").is_none());
 }
 
-// Production mutation caught: omitting either pinned identity or relaxing the unresolved license
-// warning could allow the private evaluation package or ISO to be treated as redistributable.
+// Production mutation caught: omitting either pinned identity or changing the public source
+// license could separate redistributed runtime bytes from their governing notices.
 #[test]
-fn notices_pin_runtime_and_model_and_forbid_redistribution() {
+fn notices_pin_runtime_and_model_and_preserve_public_licenses() {
     let notices = fs::read_to_string(workspace_path("packaging/NOTICES.md"))
         .expect("private-evaluation notice is missing");
 
     assert!(notices.contains("25b1ef1fea1acd210d63f8f24dc870ad6e077795ce1f54876252c6d3803c15af"));
     assert!(notices.contains("c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f"));
     assert!(notices.contains("ONNX Runtime is distributed under the MIT License."));
-    assert!(notices.contains(
-        "The resulting package and ISO are private and non-redistributable pending resolution of the Rust project's source license and the model weights' license and provenance."
-    ));
-    assert!(notices.contains(
-        "The ONNX Runtime license does not declare the Rust project or model weights to be MIT- or AGPL-licensed."
-    ));
+    assert!(notices.contains("Project source and plugin code are distributed under the GNU Affero General Public License, version 3 only (`AGPL-3.0-only`)."));
+    assert!(
+        notices.contains("The model is redistributed with that license in the runtime bundle.")
+    );
+    assert!(!notices.contains("private and non-redistributable"));
 }
 
 #[test]
