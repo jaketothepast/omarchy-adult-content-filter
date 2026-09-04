@@ -1,0 +1,117 @@
+#!/bin/bash
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+failures=0
+
+# Resolved beside this script at runtime.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-workspace" 2>/dev/null || true
+
+pass() {
+  printf 'PASS %s: %s\n' "$1" "$2"
+}
+
+fail() {
+  printf 'FAIL %s: %s\n' "$1" "$2"
+  failures=$((failures + 1))
+}
+
+display_path() {
+  if [[ -n $1 ]]; then
+    printf '%s' "$1"
+  else
+    printf '<unset>'
+  fi
+}
+
+chromium_bin=${CHROMIUM_BIN:-}
+if [[ -x $chromium_bin ]]; then
+  pass chromium "executable"
+else
+  fail chromium "not executable: $(display_path "$chromium_bin")"
+fi
+
+onnx_runtime=${ORT_DYLIB_PATH:-}
+if [[ -f $onnx_runtime ]]; then
+  pass onnx-runtime "found"
+else
+  fail onnx-runtime "not found: $(display_path "$onnx_runtime")"
+fi
+
+nudenet_model=${NUDENET_MODEL_PATH:-}
+if [[ -f $nudenet_model ]]; then
+  pass nudenet-model "found"
+else
+  fail nudenet-model "not found: $(display_path "$nudenet_model")"
+fi
+
+extension_dir=${OMARCHY_KIDS_EXTENSION_DIR:-}
+if [[ -f $extension_dir/manifest.json ]]; then
+  pass extension "manifest found"
+else
+  fail extension "manifest not found: $(display_path "$extension_dir")/manifest.json"
+fi
+
+if command -v docker >/dev/null 2>&1; then
+  pass docker-client "available"
+  if docker info >/dev/null 2>&1; then
+    pass docker-server "available"
+  else
+    fail docker-server "daemon unavailable"
+  fi
+else
+  fail docker-client "not available"
+  fail docker-server "client unavailable"
+fi
+
+if [[ -e /dev/kvm && -w /dev/kvm ]]; then
+  pass kvm "writable"
+else
+  fail kvm "/dev/kvm is not writable"
+fi
+
+ovmf_code=${OMARCHY_VM_OVMF_CODE:-}
+if [[ -f $ovmf_code ]]; then
+  pass ovmf-code "found"
+else
+  fail ovmf-code "not found: $(display_path "$ovmf_code")"
+fi
+
+ovmf_vars=${OMARCHY_VM_OVMF_VARS_TEMPLATE:-}
+if [[ -f $ovmf_vars ]]; then
+  pass ovmf-vars-template "found"
+else
+  fail ovmf-vars-template "not found: $(display_path "$ovmf_vars")"
+fi
+
+workspace_parent=${OMARCHY_KIDS_WORKSPACE_PARENT:-}
+available_kib=$(df -Pk "$workspace_parent" 2>/dev/null | awk 'NR == 2 { print $4 }')
+if [[ $available_kib =~ ^[0-9]+$ ]] && ((available_kib >= 40 * 1024 * 1024)); then
+  pass disk-space "at least 40 GiB available"
+else
+  fail disk-space "less than 40 GiB available at $(display_path "$workspace_parent")"
+fi
+
+if [[ -f ${OMARCHY_PATH:-}/install/omarchy-base.packages ]]; then
+  pass omarchy-checkout "contract satisfied"
+else
+  fail omarchy-checkout "set OMARCHY_PATH to a checkout containing install/omarchy-base.packages"
+fi
+
+if [[ -f ${OMARCHY_ISO_PATH:-}/bin/omarchy-iso-make ]]; then
+  pass omarchy-iso-checkout "contract satisfied"
+else
+  fail omarchy-iso-checkout "set OMARCHY_ISO_PATH to a checkout containing bin/omarchy-iso-make"
+fi
+
+if [[ -f ${OMARCHY_PKGS_PATH:-}/pkgbuilds/omarchy-dev/PKGBUILD ]]; then
+  pass omarchy-pkgs-checkout "contract satisfied"
+else
+  fail omarchy-pkgs-checkout "set OMARCHY_PKGS_PATH to a checkout containing pkgbuilds/omarchy-dev/PKGBUILD"
+fi
+
+if ((failures > 0)); then
+  exit 1
+fi

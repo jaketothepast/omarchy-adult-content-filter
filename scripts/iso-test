@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if (($# == 0)); then
+  echo "Usage: iso-test <path-to.iso> [arguments...]" >&2
+  exit 2
+fi
+
+iso=$1
+shift
+
+if [[ ! -f $iso ]]; then
+  echo "ERROR iso-test: ISO not found: $iso" >&2
+  exit 1
+fi
+iso=$(realpath "$iso")
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Resolved beside this script at runtime.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-workspace"
+
+export OMARCHY_ISO_MANAGE_HOST_DEPS=0
+exec "$OMARCHY_ISO_PATH/bin/omarchy-iso-test" "$iso" "$@"

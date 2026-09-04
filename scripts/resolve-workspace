@@ -1,0 +1,58 @@
+#!/bin/bash
+
+resolve_workspace() {
+  local common_dir primary_checkout workspace_parent
+  local omarchy_candidate iso_candidate packages_candidate
+  local status=0
+
+  if common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    primary_checkout=$(realpath "$common_dir/..")
+    workspace_parent=$(realpath "$primary_checkout/..")
+    export OMARCHY_KIDS_WORKSPACE_PARENT=$workspace_parent
+  elif [[ -n ${OMARCHY_PATH:-} && -n ${OMARCHY_ISO_PATH:-} && -n ${OMARCHY_PKGS_PATH:-} ]]; then
+    workspace_parent=""
+  else
+    echo "ERROR workspace: run this command from the primary omarchy-kids checkout or one of its linked worktrees." >&2
+    return 1
+  fi
+
+  omarchy_candidate=${OMARCHY_PATH:-$workspace_parent/omarchy}
+  iso_candidate=${OMARCHY_ISO_PATH:-$workspace_parent/omarchy-iso}
+  packages_candidate=${OMARCHY_PKGS_PATH:-$workspace_parent/omarchy-pkgs}
+
+  export OMARCHY_PATH=$omarchy_candidate
+  export OMARCHY_ISO_PATH=$iso_candidate
+  export OMARCHY_PKGS_PATH=$packages_candidate
+
+  if [[ -f $OMARCHY_PATH/install/omarchy-base.packages ]]; then
+    OMARCHY_PATH=$(realpath "$OMARCHY_PATH")
+    export OMARCHY_PATH
+  else
+    echo "ERROR omarchy: expected $OMARCHY_PATH/install/omarchy-base.packages." >&2
+    echo "Set OMARCHY_PATH to the Omarchy checkout." >&2
+    status=1
+  fi
+
+  if [[ -f $OMARCHY_ISO_PATH/bin/omarchy-iso-make ]]; then
+    OMARCHY_ISO_PATH=$(realpath "$OMARCHY_ISO_PATH")
+    export OMARCHY_ISO_PATH
+  else
+    echo "ERROR omarchy-iso: expected $OMARCHY_ISO_PATH/bin/omarchy-iso-make." >&2
+    echo "Set OMARCHY_ISO_PATH to the Omarchy ISO checkout." >&2
+    status=1
+  fi
+
+  if [[ -f $OMARCHY_PKGS_PATH/pkgbuilds/omarchy-dev/PKGBUILD ]]; then
+    OMARCHY_PKGS_PATH=$(realpath "$OMARCHY_PKGS_PATH")
+    export OMARCHY_PKGS_PATH
+  else
+    echo "ERROR omarchy-pkgs: expected $OMARCHY_PKGS_PATH/pkgbuilds/omarchy-dev/PKGBUILD." >&2
+    echo "Set OMARCHY_PKGS_PATH to the Omarchy packages checkout." >&2
+    status=1
+  fi
+
+  return $status
+}
+
+resolve_workspace || return 1 2>/dev/null || exit 1
+unset -f resolve_workspace

@@ -3,7 +3,8 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/9387b3fcc0c23c86661636da63faabad4235a0a6";
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -23,7 +24,11 @@
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [ pkgs.makeWrapper ];
-        nativeCheckInputs = [ pkgs.clippy pkgs.rustfmt ];
+        nativeCheckInputs = [
+          pkgs.clippy
+          pkgs.git
+          pkgs.rustfmt
+        ];
         checkPhase = ''
           runHook preCheck
           export ORT_DYLIB_PATH=${environment.ORT_DYLIB_PATH}
@@ -43,7 +48,11 @@
       };
       check = pkgs.writeShellApplication {
         name = "omarchy-kids-browser-filter-check";
-        runtimeInputs = [ pkgs.cargo pkgs.clippy pkgs.rustfmt ];
+        runtimeInputs = [
+          pkgs.cargo
+          pkgs.clippy
+          pkgs.rustfmt
+        ];
         text = ''
           export ORT_DYLIB_PATH=${environment.ORT_DYLIB_PATH}
           export NUDENET_MODEL_PATH=${environment.NUDENET_MODEL_PATH}
@@ -52,39 +61,34 @@
           cargo test --workspace
         '';
       };
-      app = command: description: {
-        type = "app";
-        program = "${pkgs.writeShellScript "omarchy-kids-browser-filter-${command}" ''
-          exec ${package}/bin/omarchy-kids-browser-filter ${command} "$@"
-        ''}";
-        meta = { inherit description; };
-      };
     in
     {
-      devShells.${system}.default = pkgs.mkShell (environment // {
-        packages = [
-          pkgs.cargo
-          pkgs.clippy
-          pkgs.rust-analyzer
-          pkgs.rustc
-          pkgs.rustfmt
-          pkgs.pkg-config
-          pkgs.onnxruntime
-          pkgs.chromium
-        ];
-      });
+      devShells.${system}.default = pkgs.mkShell (
+        environment
+        // {
+          packages = [
+            pkgs.cargo
+            pkgs.clippy
+            pkgs.rust-analyzer
+            pkgs.rustc
+            pkgs.rustfmt
+            pkgs.pkg-config
+            pkgs.onnxruntime
+            pkgs.chromium
+          ];
+        }
+      );
       packages.${system}.default = package;
       checks.${system}.default = package;
       formatter.${system} = pkgs.nixfmt;
-      apps.${system} = {
-        infer = app "infer" "Run bounded local ONNX inference for one image";
-        bench = app "bench" "Benchmark the pinned local ONNX image detector";
-        run = app "run" "Run the controlled headed Chromium interception experiment";
-        check = {
-          type = "app";
-          program = "${check}/bin/omarchy-kids-browser-filter-check";
-          meta.description = "Run formatting, lint, and workspace tests";
-        };
+      apps.${system} = import ./nix/apps.nix {
+        inherit
+          pkgs
+          package
+          check
+          environment
+          ;
+        source = ./.;
       };
     };
 }

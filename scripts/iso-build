@@ -1,0 +1,12 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Resolved beside this script at runtime.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-workspace"
+
+exec "$OMARCHY_ISO_PATH/bin/omarchy-iso-make" \
+  --keep-pkg-cache --no-boot-offer \
+  --local-source "$OMARCHY_PATH" "$OMARCHY_PKGS_PATH" "$@"
