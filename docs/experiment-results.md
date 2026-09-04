@@ -215,7 +215,76 @@ Behavioral RED/GREEN coverage was added for each generic fix: working-directory 
 
 One unrelated host-side Omarchy aggregate result remains recorded: `./test/all` reported 2 of 227 shell test files failing, `launch-about-test.sh` at `a roomy window animates` and `network-captive-portal-test.sh` because `quickshell` was unavailable in that host test environment. The focused OCR and bar state-machine regressions passed, and the final installed guest acceptance suite passed the corresponding runtime surfaces. These aggregate failures were not changed or concealed as part of the ISO baseline.
 
-## Private installed Kids ISO validation
+## Final approved private installed Kids ISO validation
+
+On 2026-09-04, the reviewed post-fix source heads produced a fresh private Kids package, a fresh uniquely tagged ISO, a fresh installed-system base, and a canonical normal-plus-external acceptance run. This is the final approved controlled-demo artifact. The first successful installed artifact remains documented in the next section as superseded-but-successful evidence; it was not deleted, renamed, or overwritten.
+
+The final result retains the same narrow claim boundary. It proves exact Arch packaging, offline inclusion and installation, the dedicated controlled launcher, the harmless 17-image fixture's interception and opaque cover, one deterministic replacement, the four-key privacy-safe metric stream, pinned detector/runtime identity, and cleanup in an installed Omarchy VM. It does not prove arbitrary-site browsing, pornography-classifier accuracy, adversarial or bypass resistance, tamper resistance, service supervision, safe default-browser or managed-browser policy, or redistribution rights.
+
+### Reviewed source identities
+
+Every repository was clean and had no upstream tracking before the build. The commands ran with `OMARCHY_PATH`, `OMARCHY_ISO_PATH`, and `OMARCHY_PKGS_PATH` unset so the reviewed sibling checkouts resolved directly.
+
+| Checkout | Branch | Reviewed revision used |
+| --- | --- | --- |
+| Omarchy Kids package, wrappers, and external acceptance | `managed-browser-filter` | `d2f0a2c9dc67486514285ed3203bd7171044c64b` |
+| Omarchy ISO generic package/build/acceptance interfaces | `omarchy-kids-local-workflow` | `29a66a248bf21079f479eccfe21067331d615079` |
+| Omarchy source packaged into the ISO and synced for normal acceptance | `omarchy-kids-iso-compat` | `fb39bcd3b92cd70eebcdaf31945b91260f2a0f94` |
+| Local package recipe | `omarchy-kids-local-package` | `bb633d619f22dd77924e9bfebf04ce3168157724` |
+| ArchISO submodule | detached | `424e78130db2af6c1ceb55b442d7914b1109ff2b` |
+
+### Fresh readiness and native package preflight
+
+The final validation began from the exact Nix source snapshot `/nix/store/3hqwd7gffq0w6npj0xz429fxihxfrw2v-source`. All 39 Git-index entries matched that snapshot by path, bytes, symlink target, and executable bit.
+
+| Command | Wall time | Result |
+| --- | ---: | --- |
+| `nix run .#doctor` | 1.941s | Exit 0; all 13 host, tool, firmware, model, and sibling checks passed. |
+| `nix run .#iso-unit` | 6.305s | Exit 0; the ISO shell suites and all 63 Python tests passed. |
+| `nix run .#check` | 3.648s | Exit 0; 58 library, four CLI, one inference, three package-asset, and 49 workspace-script tests passed. |
+| `nix flake check` | 1.488s | Exit 0; all flake outputs evaluated and checks passed. |
+
+A fresh native Arch container built and installed the package from that snapshot. Its sole archive was 23,034,122 bytes with SHA-256 `d096786a04114e1cb571b90266a6bae65a454ecd432bdee8157f681aea345fed`. Independent checks validated the exact four-source `.SRCINFO` and hashes, `pacman -Qip`, the complete 26-line `pacman -Qlp` inventory and 14-entry non-directory allowlist, root ownership and modes, the two unique ELF objects and closed interpreter/library dependencies, the stable `libonnxruntime.so.1` ABI path and `libonnxruntime.so.1` SONAME, all installed model/license/setup hashes, and installed 1×1 PNG inference with the pinned model and empty detections.
+
+The first preflight validator followed both ONNX Runtime symlink aliases and therefore overcounted two ELF objects as four. That complete attempt is preserved. A fresh unique rerun changed only the independent scan to exclude symlinks and passed in 107.539 seconds; no production source or acceptance condition changed.
+
+### Exact successful build, install, and acceptance
+
+| Command | Wall time | Result |
+| --- | ---: | --- |
+| `nix run .#kids-iso-build` with tag `kids-demo-final-20260904-100917-980113195` | 374.367s | Exit 0; exactly one tagged ISO and one matching package archive were published, with no staging residue. |
+| `nix run .#kids-iso-test -- "$kids_iso" --install-only --no-preview` | 404.744s | Exit 0; the real graphical configurator completed, the second bounded SSH bootstrap attempt succeeded, and the fresh base was saved. |
+| `nix run .#kids-iso-test -- "$kids_iso" --reuse-base --sync-omarchy /home/jake/Projects/omarchy --no-preview` | 153.546s | Exit 0; shortcut smoke, normal installed acceptance, external Kids acceptance, collection, and shutdown passed. |
+
+The install run is `/home/jake/Projects/omarchy-iso/test-runs/omarchy-2026.09.04-x86_64-kids-demo-final-20260904-100917-980113195/runs/20260904-063725`. Its 23 files include 21 screenshots, a nonempty pacman log that records both the requested package and `[ALPM] installed omarchy-kids-browser-filter-demo (0.1.0-1)`, and a timing document whose 14 phases all report `ok`. The first console/SSH attempt reached its explicit 120-second bound and retained its failure screenshot; the harness's second bounded attempt succeeded and retained its bootstrap screenshots.
+
+The canonical acceptance run is `/home/jake/Projects/omarchy-iso/test-runs/omarchy-2026.09.04-x86_64-kids-demo-final-20260904-100917-980113195/runs/20260904-064741`. It contains 55 files and 49 screenshots: 35 files and 34 screenshots from normal Omarchy acceptance, exactly three external Kids evidence files, the overlay, host captures, and the collected installer log. Normal acceptance passed in 80 seconds and explicitly passed both `no failed system units` and `no failed user units`.
+
+### Final immutable artifacts
+
+| Artifact | Size | Mode | SHA-256 |
+| --- | ---: | ---: | --- |
+| `/home/jake/Projects/omarchy-iso/release/omarchy-2026.09.04-x86_64-kids-demo-final-20260904-100917-980113195.iso` | 6,209,560,576 bytes | `0644` | `c76830249287bad5235fb9bfb0690a078203ab62cb34cb9387c28e2436dc7f76` |
+| `/home/jake/Projects/omarchy-iso/release/local-packages/kids-demo-final-20260904-100917-980113195/omarchy-kids-browser-filter-demo-0.1.0-1-x86_64.pkg.tar.zst` | 23,034,995 bytes | `0644` | `54d8046e070e9f89e2fbb9c720c2128d5d722f15703e038420c0a99ea0d1edd2` |
+| `/home/jake/Projects/omarchy-iso/test-runs/omarchy-2026.09.04-x86_64-kids-demo-final-20260904-100917-980113195/base.qcow2` | 6,527,582,208 bytes; 40 GiB virtual | `0644` | `982618b68b74b373ae987a12aec9bb612ed94ad9a02e42a0bdfe229a922f9510` |
+| Installed base `OVMF_VARS.4m.fd`, before acceptance | 540,672 bytes | `0600` | `dc6a2a7c884c4a41a1232cdff043d16440e2066a7763f72f84fa4ae0a716e6b3` |
+| Acceptance `run.qcow2` overlay | 198,901,760 bytes; 40 GiB virtual | `0644` | `c8c3b43ef437ad3321519ee9b94013214094ed31a3654af1869f565da6a3a57a` |
+
+Plain, non-repairing `qemu-img check` with the exact QEMU 11.1.0 closure found no errors in the base or overlay. The base hash remained unchanged through overlay acceptance. The expectedly mutable OVMF vars ended with SHA-256 `cf2d126d724b8e8525cb33463786e1285304e1b68349f17a36a60fa2882f0d78` and retained mode `0600`.
+
+### Independently validated installed evidence
+
+The external guest test observed the installed package, checked every owned non-directory path against the complete allowlist, checked required ownership and modes, verified the exact two-file extension and ONNX Runtime symlink chain, and observed a new headed Chromium client. The final archive independently reproduces the exact 14-entry non-directory allowlist, while the installer and collected logs tie that archive name and version to the installed system.
+
+The collected summary independently passed the complete strengthened predicate: Chromium `Chrome/152.0.7977.82`, ONNX Runtime `1.27.1`, model SHA-256 `c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f`, 17 intercepted, 16 continued, one replaced, zero unresolved, clean shutdown, and 2 ms reveal latency. The requested and actual hold were both 1,500 ms. Three hold samples contained 1,413,000 opaque `[17, 19, 24, 255]` pixels; the reveal sample contained 471,000 pixels, all 16 safe colors, and placeholder `[255, 0, 255, 255]`, while excluding original flagged color `[5, 0, 0, 255]`. All 17 DOM images had the exact expected 1×1 color, including the placeholder at index 5.
+
+The metric stream contains exactly 34 valid JSON objects with only sorted keys `elapsed_micros`, `fixture_index`, `stage`, and `verdict`: 17 `inference`, 17 `policy`, 32 `allow`, and two `replace`, with exactly both stages per index and replacement only at index 5. The summary, metrics, external acceptance log, and collected installer log have SHA-256 values `02f29f308205195fafe1c66c84fd71301b4c2ef47e3039fbfe518c9842af1356`, `58a743c4d4836771de7872d19b23cc54d92a989bb7c3ecfc2699c70d56e6ca6c`, `d659ec0326a5e2da3a465cf36ed1df8d859ff4a754278ead46d7e5eaf2913c47`, and `495ee2a45c851a96dc9859f3ebaa3339a232d8f32fa55f7d205220d4375ff72a`, respectively.
+
+All 461 files frozen immediately before the final build and all 548 initially inventoried prior artifact files passed final SHA-256 verification; all pre-existing leaf/file metadata was unchanged. No disposable Kids profile, Kids-launched Chromium process, QEMU process, or configured listener remained. Complete logs, inventories, hashes, predicates, package validation, timings, and transient diagnoses are preserved under `.superpowers/sdd/2026-09-03-kids-iso-controlled-demo-implementation/final-artifact-validation-artifacts/20260904-100917-980113195/`.
+
+All artifacts and commits remain local. No push, fetch, fork, pull request, remote change, upload, artifact replacement, evidence deletion, or assertion weakening was performed.
+
+## Superseded but successful first private installed Kids ISO validation
 
 On 2026-09-04, a separate uniquely tagged Kids ISO was built from the reviewed local repositories, installed through the real Omarchy graphical configurator into a fresh QEMU/KVM base, and validated through both the normal installed Omarchy acceptance suite and the external Kids browser fixture. This is not the upstream baseline ISO above: it contains one private local package, `omarchy-kids-browser-filter-demo`, and exposes only the dedicated controlled-demo launcher.
 
