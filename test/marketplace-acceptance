@@ -1,0 +1,179 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "${BASH_SOURCE[0]%/*}" && pwd -P)
+# shellcheck source=lib/adult-content-filter-process.sh
+source "$SCRIPT_DIR/lib/adult-content-filter-process.sh"
+
+PLUGIN_ID=io.github.jaketothepast.adult-content-filter
+REPOSITORY=https://github.com/jaketothepast/omarchy-adult-content-filter
+PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
+ARTIFACTS=${OMARCHY_ACCEPTANCE_DIR:-/tmp/omarchy-external-acceptance}
+PROFILE_ROOT=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/omarchy-adult-content-filter
+added=false
+enabled=false
+
+mkdir -p "$ARTIFACTS"
+
+pass() {
+  printf 'ok - %s\n' "$1"
+}
+
+fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  exit 1
+}
+
+cleanup() {
+  local cleanup_status=0
+  if $added; then
+    omarchy-shell "$PLUGIN_ID" stop >/dev/null 2>&1 || true
+  fi
+  if $enabled; then
+    omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1 || cleanup_status=$?
+    enabled=false
+  fi
+  if $added; then
+    omarchy plugin remove "$PLUGIN_ID" --yes >/dev/null 2>&1 || cleanup_status=$?
+    added=false
+  fi
+  return "$cleanup_status"
+}
+
+finish() {
+  local incoming_status=$?
+  local cleanup_status=0
+  trap - EXIT
+  cleanup || cleanup_status=$?
+  if ((incoming_status != 0)); then
+    exit "$incoming_status"
+  fi
+  exit "$cleanup_status"
+}
+trap finish EXIT
+
+[[ ! -e $PLUGIN_DIR && ! -L $PLUGIN_DIR ]] || fail "plugin starts absent"
+baseline_clients=$(hyprctl -j clients) || fail "Hyprland clients are observable"
+baseline_pids=$(pgrep -f -- 'chromium.*omarchy-adult-content-filter' || true)
+
+omarchy plugin add "$REPOSITORY" --yes
+added=true
+[[ -d $PLUGIN_DIR/.git ]] || fail "plugin command clones one repository"
+[[ $(git -C "$PLUGIN_DIR" config --get remote.origin.url) == "$REPOSITORY" ]] || fail "plugin clone retains the public source"
+omarchy-plugin-validate "$PLUGIN_DIR" || fail "installed plugin passes the Omarchy validator"
+[[ -z $(find "$PLUGIN_DIR" -path "$PLUGIN_DIR/.git" -prune -o -type l -print -quit) ]] || fail "installed plugin contains no symlinks"
+(
+  cd -- "$PLUGIN_DIR/runtime"
+  sha256sum --check --strict SHA256SUMS
+) >"$ARTIFACTS/runtime-checksums.log" || fail "bundled runtime checksums pass after cloning"
+git -C "$PLUGIN_DIR" rev-parse HEAD >"$ARTIFACTS/plugin-commit.txt"
+cp -- "$PLUGIN_DIR/manifest.json" "$ARTIFACTS/plugin-manifest.json"
+pass "plugin installs as one validated repository"
+
+omarchy plugin enable "$PLUGIN_ID" --section right
+enabled=true
+omarchy plugin list --json | jq -e --arg id "$PLUGIN_ID" '
+  any(.[]; .id == $id and .enabled == true and (.kinds | index("service")) != null and (.kinds | index("bar-widget")) != null)
+' >/dev/null || fail "plugin service and bar widget are enabled"
+
+initial_status=""
+service_deadline=$((SECONDS + 30))
+while ((SECONDS < service_deadline)); do
+  initial_status=$(omarchy-shell "$PLUGIN_ID" status 2>/dev/null || true)
+  if jq -e '.running == false and .stopping == false' <<<"$initial_status" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+jq -e '.running == false and .stopping == false' <<<"$initial_status" >/dev/null 2>&1 || fail "kept service becomes available"
+printf '%s\n' "$initial_status" >"$ARTIFACTS/plugin-status-initial.json"
+
+[[ $(omarchy-shell "$PLUGIN_ID" launch) == started ]] || fail "QML service starts the bundled supervisor"
+managed_address=""
+browser_pid=""
+client_deadline=$((SECONDS + 60))
+while ((SECONDS < client_deadline)); do
+  current_clients=$(hyprctl -j clients 2>/dev/null || printf '[]\n')
+  managed_client=$(adult_filter_new_chromium_client "$baseline_clients" "$current_clients")
+  if [[ -n $managed_client ]]; then
+    IFS=$'\t' read -r managed_address browser_pid <<<"$managed_client"
+  fi
+  [[ -n $managed_address && -n $browser_pid ]] && break
+  sleep 0.25
+done
+[[ -n $managed_address && -n $browser_pid ]] || fail "service-supervised browser window appears"
+
+browser_cmdline=/proc/$browser_pid/cmdline
+adult_filter_cmdline_has_exact_argument "$browser_cmdline" --disable-dev-tools || fail "service-supervised browser disables developer tools"
+adult_filter_cmdline_has_exact_argument "$browser_cmdline" --ozone-platform=wayland || fail "service-supervised browser uses native Wayland"
+adult_filter_cmdline_has_argument_prefix "$browser_cmdline" --user-data-dir="$PROFILE_ROOT/omarchy-kids-browser-" || fail "service-supervised browser uses a private disposable profile"
+running_status=$(omarchy-shell "$PLUGIN_ID" status) || fail "service reports its running state"
+jq -e '.running == true and .stopping == false' <<<"$running_status" >/dev/null || fail "service reports its running state"
+printf '%s\n' "$running_status" >"$ARTIFACTS/plugin-status-running.json"
+grim "$ARTIFACTS/service-supervised-browser.png" || fail "service-supervised browser screenshot is captured"
+
+[[ $(omarchy-shell "$PLUGIN_ID" stop) == stopping ]] || fail "QML service stops its supervisor"
+stopped_status=""
+stop_deadline=$((SECONDS + 30))
+while ((SECONDS < stop_deadline)); do
+  stopped_status=$(omarchy-shell "$PLUGIN_ID" status 2>/dev/null || true)
+  if jq -e '.running == false and .stopping == false and .lastError == ""' <<<"$stopped_status" >/dev/null 2>&1 &&
+    ! kill -0 "$browser_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+jq -e '.running == false and .stopping == false and .lastError == ""' <<<"$stopped_status" >/dev/null 2>&1 || fail "service settles after stopping"
+! kill -0 "$browser_pid" 2>/dev/null || fail "service reaps the managed Chromium process"
+printf '%s\n' "$stopped_status" >"$ARTIFACTS/plugin-status-stopped.json"
+pass "QML service owns one managed browser lifecycle"
+
+summary="$ARTIFACTS/browser-filter-summary.json"
+metrics="$ARTIFACTS/browser-filter-metrics.jsonl"
+CHROMIUM_BIN=/usr/bin/chromium \
+ORT_DYLIB_PATH="$PLUGIN_DIR/runtime/lib/onnxruntime/libonnxruntime.so.1.27.1" \
+NUDENET_MODEL_PATH="$PLUGIN_DIR/runtime/share/models/320n.onnx" \
+OMARCHY_KIDS_EXTENSION_DIR="$PLUGIN_DIR/runtime/share/browser-extension" \
+OMARCHY_KIDS_BLOCKLIST_PATH="$PLUGIN_DIR/runtime/share/policies/adult-domains.hosts" \
+OMARCHY_KIDS_PROFILE_ROOT="$PROFILE_ROOT" \
+  "$PLUGIN_DIR/runtime/bin/omarchy-adult-content-filter" \
+    run --images 17 --flagged-index 5 --hold-millis 1500 --assert-no-flash --json \
+    >"$summary" 2>"$metrics" || fail "bundled controlled filter proof exits successfully"
+
+jq -e '
+  .intercepted == 17 and .continued == 16 and .replaced == 1 and
+  .unresolved == 0 and .clean_shutdown == true and
+  .onnx_runtime_version == "1.27.1" and
+  .model_sha256 == "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f" and
+  (.reveal_latency_millis | type == "number" and . >= 0 and . <= 500) and
+  .no_flash_assertion.requested_hold_millis == 1500 and
+  (.no_flash_assertion.actual_hold_millis | type == "number" and . >= 1500) and
+  (.no_flash_assertion.hold_screenshot_count | type == "number" and . >= 3) and
+  .no_flash_assertion.cover_rgba == [17,19,24,255] and
+  .no_flash_assertion.safe_fixture_colors_present == 16 and
+  .no_flash_assertion.placeholder_color_present == true and
+  .no_flash_assertion.original_flagged_color_absent == true and
+  (.dom_images | length) == 17 and .dom_images[5].rgba == [255,0,255,255]
+' "$summary" >/dev/null || fail "bundled controlled filter proof satisfies the fail-closed contract"
+[[ $(wc -l <"$metrics") -eq 34 ]] || fail "bundled controlled filter proof writes 34 metrics"
+jq -se '
+  length == 34 and
+  all(.[]; type == "object" and keys == ["elapsed_micros", "fixture_index", "stage", "verdict"])
+' "$metrics" >/dev/null || fail "bundled controlled filter metrics remain privacy-safe"
+pass "bundled browser passes the controlled layered-filter proof"
+
+leaked_profile=$(find "$PROFILE_ROOT" -maxdepth 1 -type d -name 'omarchy-kids-browser-*' -print -quit 2>/dev/null)
+[[ -z $leaked_profile ]] || fail "disposable Chromium profile is removed"
+current_pids=$(pgrep -f -- 'chromium.*omarchy-adult-content-filter' || true)
+while IFS= read -r pid; do
+  [[ -n $pid ]] || continue
+  grep -Fx -- "$pid" <<<"$baseline_pids" >/dev/null || fail "plugin leaves no Chromium process"
+done <<<"$current_pids"
+
+omarchy plugin disable "$PLUGIN_ID"
+enabled=false
+omarchy plugin remove "$PLUGIN_ID" --yes
+added=false
+[[ ! -e $PLUGIN_DIR && ! -L $PLUGIN_DIR ]] || fail "plugin command removes the cloned unit"
+pass "marketplace plugin cleanup is complete"

@@ -77,6 +77,7 @@
           node plugin/tests/runtime-model-test.js
           bash tests/plugin-runtime-contract.sh
           bash tests/plugin-bundle-contract.sh
+          bash tests/plugin-marketplace-acceptance-contract.sh
           bash tests/managed-package-recipe-contract.sh
         '';
       };

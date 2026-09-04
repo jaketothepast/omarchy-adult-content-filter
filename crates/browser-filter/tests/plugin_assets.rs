@@ -91,6 +91,35 @@ fn qml_lifecycle_is_bound_to_the_tested_state_model() {
 }
 
 #[test]
+fn service_exposes_only_supervisor_lifecycle_over_ipc() {
+    let service = read("Service.qml");
+
+    for required in [
+        "readonly property string pluginId:",
+        "IpcHandler {",
+        "target: root.pluginId",
+        "function launch(): string",
+        "function stop(): string",
+        "function status(): string",
+        "return root.launch() ? \"started\"",
+        "return root.stop() ? \"stopping\" : \"stopped\"",
+    ] {
+        assert!(
+            service.contains(required),
+            "service IPC missing {required:?}"
+        );
+    }
+
+    assert_eq!(service.matches("IpcHandler {").count(), 1);
+    for forbidden in ["function exec", "function command", "function browse"] {
+        assert!(
+            !service.contains(forbidden),
+            "service IPC exposes {forbidden:?}"
+        );
+    }
+}
+
+#[test]
 fn marketplace_surface_documents_one_clone_install_and_honest_scope() {
     let readme = read("README.md");
 

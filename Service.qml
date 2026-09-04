@@ -14,6 +14,9 @@ Item {
   readonly property string pluginDir: manifest && manifest.__sourceDir
     ? String(manifest.__sourceDir)
     : ""
+  readonly property string pluginId: manifest && manifest.id
+    ? String(manifest.id)
+    : "io.github.jaketothepast.adult-content-filter"
   readonly property bool running: supervisorProcess.running
 
   function launch() {
@@ -42,6 +45,27 @@ Item {
   function focus() {
     root.lastError = "Managed browser is already running"
     return false
+  }
+
+  IpcHandler {
+    target: root.pluginId
+
+    function launch(): string {
+      return root.launch() ? "started" : (root.running ? "running" : "error")
+    }
+
+    function stop(): string {
+      return root.stop() ? "stopping" : "stopped"
+    }
+
+    function status(): string {
+      return JSON.stringify({
+        running: root.running,
+        stopping: root.stopping,
+        lastExitCode: root.lastExitCode,
+        lastError: root.lastError
+      })
+    }
   }
 
   Process {
