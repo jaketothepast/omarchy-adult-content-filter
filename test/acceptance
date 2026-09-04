@@ -1,0 +1,52 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+TEST="$ROOT/test/acceptance.d/browser-filter-demo-test.sh"
+
+export OMARCHY_ACCEPTANCE_DIR=${OMARCHY_ACCEPTANCE_DIR:-/tmp/omarchy-external-acceptance}
+mkdir -p "$OMARCHY_ACCEPTANCE_DIR"
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+
+if [[ -z ${DISPLAY:-} ]]; then
+  display=$(systemctl --user show-environment | sed -n 's/^DISPLAY=//p' | head -1)
+  export DISPLAY=${display:-:0}
+fi
+
+if [[ -z ${LANG:-} ]]; then
+  locale_name=$(systemctl --user show-environment | sed -n 's/^LANG=//p' | head -1)
+  export LANG=${locale_name:-C.UTF-8}
+fi
+
+session_deadline=$((SECONDS + ${OMARCHY_ACCEPTANCE_BOOT_TIMEOUT:-300}))
+while true; do
+  signature=${HYPRLAND_INSTANCE_SIGNATURE:-}
+  if [[ -z $signature ]]; then
+    signature=$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)
+  fi
+
+  if [[ -n $signature ]]; then
+    export HYPRLAND_INSTANCE_SIGNATURE=$signature
+    if hyprctl -j monitors >/dev/null 2>&1; then
+      break
+    fi
+  fi
+
+  if ((SECONDS >= session_deadline)); then
+    echo "not ok - Hyprland session never came up" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+if [[ -z ${WAYLAND_DISPLAY:-} ]]; then
+  wayland_display=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' -printf '%f\n' 2>/dev/null | head -1)
+  export WAYLAND_DISPLAY=${wayland_display:-wayland-1}
+fi
+
+status=0
+timeout 420 bash "$TEST" || status=$?
+exit $status

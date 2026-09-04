@@ -1,0 +1,45 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if (($# == 0)); then
+  echo "Usage: kids-iso-test <path-to.iso> [arguments...]" >&2
+  exit 2
+fi
+
+iso=$1
+shift
+if [[ ! -f $iso ]]; then
+  echo "ERROR kids-iso-test: ISO not found: $iso" >&2
+  exit 1
+fi
+iso=$(realpath "$iso")
+
+if [[ ! -d ${OMARCHY_KIDS_PACKAGE_SOURCE:-} ]]; then
+  echo "ERROR kids-iso-test: package source not found: ${OMARCHY_KIDS_PACKAGE_SOURCE:-<unset>}" >&2
+  exit 1
+fi
+OMARCHY_KIDS_PACKAGE_SOURCE=$(realpath "$OMARCHY_KIDS_PACKAGE_SOURCE")
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Resolved beside this script at runtime.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-workspace"
+
+reuse_base=false
+for argument in "$@"; do
+  if [[ $argument == "--reuse-base" ]]; then
+    reuse_base=true
+  fi
+done
+
+base="$OMARCHY_ISO_PATH/test-runs/$(basename "$iso" .iso)/base.qcow2"
+if [[ $reuse_base == false && -e $base ]]; then
+  echo "ERROR kids-iso-test: reusable base already exists: $base" >&2
+  echo "Use --reuse-base to use it, or build a uniquely tagged ISO." >&2
+  exit 1
+fi
+
+export OMARCHY_ISO_MANAGE_HOST_DEPS=0
+exec "$OMARCHY_ISO_PATH/bin/omarchy-iso-test" \
+  "$iso" --external-acceptance "$OMARCHY_KIDS_PACKAGE_SOURCE" "$@"

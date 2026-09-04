@@ -127,12 +127,30 @@ in
     runtimeInputs = isoUnitInputs ++ (with pkgs; [ docker-client ]);
   };
 
+  kids-iso-build = mkApp {
+    name = "kids-iso-build";
+    description = "Build the private controlled-demo ISO from reviewed local sources";
+    command = scriptCommand "kids-iso-build";
+    runtimeInputs = isoUnitInputs ++ (with pkgs; [ docker-client ]);
+    runtimeEnvironment.OMARCHY_KIDS_PACKAGE_SOURCE = source;
+  };
+
   iso-test = mkApp {
     name = "iso-test";
     description = "Run the Omarchy ISO acceptance harness with Nix-managed host tools";
     command = scriptCommand "iso-test";
     runtimeInputs = isoVmInputs;
     runtimeEnvironment = firmwareEnvironment;
+  };
+
+  kids-iso-test = mkApp {
+    name = "kids-iso-test";
+    description = "Run the private controlled-demo ISO acceptance proof";
+    command = scriptCommand "kids-iso-test";
+    runtimeInputs = isoVmInputs;
+    runtimeEnvironment = firmwareEnvironment // {
+      OMARCHY_KIDS_PACKAGE_SOURCE = source;
+    };
   };
 
   iso-integration = mkApp {

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ ! -d ${OMARCHY_KIDS_PACKAGE_SOURCE:-} ]]; then
+  echo "ERROR kids-iso-build: package source not found: ${OMARCHY_KIDS_PACKAGE_SOURCE:-<unset>}" >&2
+  exit 1
+fi
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Resolved beside this script at runtime.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/resolve-workspace"
+
+OMARCHY_KIDS_PACKAGE_SOURCE=$(realpath "$OMARCHY_KIDS_PACKAGE_SOURCE")
+OMARCHY_KIDS_ISO_TAG=${OMARCHY_KIDS_ISO_TAG:-kids-demo-$(date -u +%Y%m%d-%H%M%S-%N)}
+
+exec "$OMARCHY_ISO_PATH/bin/omarchy-iso-make" \
+  --keep-pkg-cache \
+  --no-boot-offer \
+  --local-source "$OMARCHY_PATH" "$OMARCHY_PKGS_PATH" \
+  --local-package omarchy-kids-browser-filter-demo "$OMARCHY_KIDS_PACKAGE_SOURCE" \
+  --output-tag "$OMARCHY_KIDS_ISO_TAG"

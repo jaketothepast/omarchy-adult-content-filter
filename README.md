@@ -18,6 +18,15 @@ With `--json`, `run` writes one headed-experiment summary to stdout, including c
 
 The measured 2026-09-03 environment, complete p50/p90/p95 benchmark output, browser assertions, performance-gate assessment, and limitations are in [docs/experiment-results.md](docs/experiment-results.md).
 
+## Build and test the private controlled demo ISO
+
+```bash
+nix run .#kids-iso-build
+nix run .#kids-iso-test -- /absolute/path/to/omarchy-kids-demo.iso --reuse-base --no-preview
+```
+
+This is a private, non-redistributable controlled demo for the 17-image local fixture only. It does not establish arbitrary-site filtering, pornography-classifier accuracy, default-browser enforcement, tamper resistance, supervision, or redistribution rights.
+
 ## Development
 
 Enter the pinned development environment and run the workspace tests:

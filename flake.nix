@@ -27,6 +27,7 @@
         nativeCheckInputs = [
           pkgs.clippy
           pkgs.git
+          pkgs.jq
           pkgs.rustfmt
         ];
         checkPhase = ''
@@ -52,6 +53,7 @@
           pkgs.cargo
           pkgs.clippy
           pkgs.git
+          pkgs.jq
           pkgs.rustfmt
         ];
         text = ''
@@ -76,6 +78,7 @@
             pkgs.pkg-config
             pkgs.onnxruntime
             pkgs.chromium
+            pkgs.jq
           ];
         }
       );
