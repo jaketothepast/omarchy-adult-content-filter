@@ -200,3 +200,35 @@ fn marketplace_plugin_tree_has_no_tracked_symlinks() {
         "the Omarchy marketplace rejects plugin-folder symlinks: {symlinks:?}"
     );
 }
+
+#[test]
+fn marketplace_discovers_only_the_root_plugin_manifest() {
+    let root = workspace_path(".");
+    let mut manifests = Vec::new();
+    for entry in fs::read_dir(&root).expect("repository root must be readable") {
+        let entry = entry.expect("repository root entry must be readable");
+        let path = entry.path();
+        if entry
+            .file_type()
+            .expect("entry type must be readable")
+            .is_file()
+            && entry.file_name() == "manifest.json"
+        {
+            manifests.push("manifest.json".to_owned());
+        } else if entry
+            .file_type()
+            .expect("entry type must be readable")
+            .is_dir()
+        {
+            let nested = path.join("manifest.json");
+            if nested.is_file() {
+                manifests.push(format!(
+                    "{}/manifest.json",
+                    entry.file_name().to_string_lossy()
+                ));
+            }
+        }
+    }
+    manifests.sort();
+    assert_eq!(manifests, ["manifest.json"]);
+}

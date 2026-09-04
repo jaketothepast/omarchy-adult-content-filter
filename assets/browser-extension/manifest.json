@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Omarchy Kids Browser Filter",
+  "name": "Omarchy Adult Content Filter Cover",
   "version": "0.1.0",
   "content_scripts": [
     {

@@ -21,7 +21,7 @@
         NUDENET_MODEL_PATH = model;
         OMARCHY_KIDS_BLOCKLIST_PATH = adultDomains;
         CHROMIUM_BIN = "${pkgs.chromium}/bin/chromium";
-        OMARCHY_KIDS_EXTENSION_DIR = ./browser-extension;
+        OMARCHY_KIDS_EXTENSION_DIR = ./assets/browser-extension;
       };
       package = pkgs.rustPlatform.buildRustPackage {
         pname = "omarchy-kids-browser-filter";

@@ -48,8 +48,8 @@ recipe_text=$(<"$recipe")
 for required in \
   'packaging/arch/omarchy-adult-content-filter' \
   'packaging/arch/omarchy-adult-content-filter.desktop' \
-  'browser-extension/manifest.json' \
-  'browser-extension/cover.css' \
+  'assets/browser-extension/manifest.json' \
+  'assets/browser-extension/cover.css' \
   '$license_dir/LICENSE' \
   'policies/adult-domains.hosts' \
   '$license_dir/stevenblack-license.txt'; do

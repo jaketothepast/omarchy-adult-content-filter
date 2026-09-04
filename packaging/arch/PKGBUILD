@@ -65,8 +65,8 @@ package() {
   install -Dm755 "$srcdir/omarchy-adult-content-filter/packaging/arch/omarchy-adult-content-filter" "$pkgdir/usr/bin/omarchy-adult-content-filter"
   install -Dm644 "$srcdir/omarchy-adult-content-filter/packaging/arch/omarchy-adult-content-filter.desktop" "$pkgdir/usr/share/applications/omarchy-adult-content-filter.desktop"
 
-  install -Dm644 "$srcdir/omarchy-adult-content-filter/browser-extension/manifest.json" "$private_share/browser-extension/manifest.json"
-  install -Dm644 "$srcdir/omarchy-adult-content-filter/browser-extension/cover.css" "$private_share/browser-extension/cover.css"
+  install -Dm644 "$srcdir/omarchy-adult-content-filter/assets/browser-extension/manifest.json" "$private_share/browser-extension/manifest.json"
+  install -Dm644 "$srcdir/omarchy-adult-content-filter/assets/browser-extension/cover.css" "$private_share/browser-extension/cover.css"
   install -Dm644 "$srcdir/320n.onnx" "$private_share/models/320n.onnx"
   install -Dm644 "$srcdir/adult-domains.hosts" "$private_share/policies/adult-domains.hosts"
 

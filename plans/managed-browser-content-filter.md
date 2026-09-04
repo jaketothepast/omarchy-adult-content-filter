@@ -47,9 +47,10 @@ omarchy-kids/
 │       │   ├── policy.rs
 │       │   └── main.rs
 │       └── tests/
-├── browser-extension/
-│   ├── manifest.json
-│   └── cover.css
+├── assets/
+│   └── browser-extension/
+│       ├── manifest.json
+│       └── cover.css
 ├── fixtures/
 │   └── browser-filter/
 ├── nix/

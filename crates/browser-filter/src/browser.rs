@@ -1507,7 +1507,8 @@ mod tests {
     // remote CSS loads would widen this permissionless declarative cover into executable behavior.
     #[test]
     fn extension_contract_declares_a_permissionless_document_start_cover() {
-        let extension = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../browser-extension");
+        let extension =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/browser-extension");
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(extension.join("manifest.json")).unwrap()).unwrap();
 
