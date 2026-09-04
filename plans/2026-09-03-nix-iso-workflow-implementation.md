@@ -160,7 +160,8 @@ git commit -m "Allow alternate OVMF firmware paths"
 - Modify: `bin/omarchy-iso-boot`
 - Modify: `bin/omarchy-iso-test`
 - Modify: `bin/omarchy-iso-test-windows-disk`
-- Modify: `test/integration.d/base-test.sh`
+- Modify: `test/integration`
+- Modify only if dependency validation needs it: `test/integration.d/base-test.sh`
 - Create or modify: focused tests under `test/unit/`
 
 **Interfaces:**
