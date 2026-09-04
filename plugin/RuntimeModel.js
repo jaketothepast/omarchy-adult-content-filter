@@ -8,7 +8,7 @@ function requestStop(running) {
 
 function finishSupervisor(exitCode, stopping) {
   var code = Number(exitCode)
-  var expectedStop = !!stopping && (code === 0 || code === 143)
+  var expectedStop = !!stopping && (code === 0 || code === 15 || code === 143)
   return {
     running: false,
     stopping: false,

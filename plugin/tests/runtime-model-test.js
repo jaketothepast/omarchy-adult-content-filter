@@ -19,6 +19,18 @@ assert.deepEqual(model.finishSupervisor(143, true), {
   exitCode: 143,
   error: ""
 })
+assert.deepEqual(model.finishSupervisor(15, true), {
+  running: false,
+  stopping: false,
+  exitCode: 15,
+  error: ""
+})
+assert.deepEqual(model.finishSupervisor(15, false), {
+  running: false,
+  stopping: false,
+  exitCode: 15,
+  error: "Managed browser supervisor exited with status 15"
+})
 assert.deepEqual(model.finishSupervisor(70, false), {
   running: false,
   stopping: false,
