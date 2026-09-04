@@ -772,6 +772,34 @@ async fn finish_exited_browser_handler(
     }
 }
 
+struct ShutdownSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .context("failed to listen for SIGINT")?,
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("failed to listen for SIGTERM")?,
+        })
+    }
+
+    async fn wait(&mut self) -> Result<()> {
+        tokio::select! {
+            signal = self.interrupt.recv() => {
+                signal.context("SIGINT listener closed")?;
+            }
+            signal = self.terminate.recv() => {
+                signal.context("SIGTERM listener closed")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 async fn managed_event_loop(
     browser: &mut Browser,
     detector_session: &HeadedDetectorSession,
@@ -779,6 +807,7 @@ async fn managed_event_loop(
     request_policy: &RequestPolicy,
     config: &ManagedBrowserConfig,
 ) -> Result<ManagedBrowserSummary> {
+    let mut shutdown_signals = ShutdownSignals::new()?;
     within(
         config.acquisition_timeout,
         browser.execute(managed_download_behavior()),
@@ -974,8 +1003,8 @@ async fn managed_event_loop(
                     break;
                 }
             }
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("failed to listen for Ctrl-C")?;
+            signal = shutdown_signals.wait() => {
+                signal?;
                 break;
             }
             _ = exit_poll.tick() => {
@@ -1427,7 +1456,7 @@ mod tests {
     use super::{
         Classification, MEDIA_GUARD_BOOTSTRAP, ManagedBrowserConfig, ManagedBrowserSummary,
         ManualCounts, ManualPageState, ManualPauseLedger, NavigationDecision, PauseStage,
-        RequestLayerOutcome, RequestLoaderLedger, ResponsePlan, TargetAction,
+        RequestLayerOutcome, RequestLoaderLedger, ResponsePlan, ShutdownSignals, TargetAction,
         apply_navigation_decision, build_managed_browser_config, classification_for,
         discardable_obsolete_interception, managed_download_behavior, media_block_expression,
         navigation_decision, network_headers, pause_stage, request_command, response_plan,
@@ -2250,5 +2279,20 @@ mod tests {
         assert!(!state.load_completed("loader-prior"));
         assert!(!state.ready_to_reveal());
         assert!(state.load_completed("loader-current"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_shutdown_accepts_sigterm_for_graceful_browser_cleanup() {
+        let mut signals = ShutdownSignals::new().unwrap();
+        let delivered = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(delivered.success());
+
+        tokio::time::timeout(Duration::from_secs(1), signals.wait())
+            .await
+            .expect("SIGTERM must reach the managed shutdown path")
+            .unwrap();
     }
 }
