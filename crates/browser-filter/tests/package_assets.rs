@@ -110,7 +110,7 @@ fn wrapper_exports_exact_installed_paths_and_execs_private_run_command() {
             ),
             (
                 "ORT_DYLIB_PATH",
-                "/usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1.27.1",
+                "/usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1",
             ),
         ])
     );

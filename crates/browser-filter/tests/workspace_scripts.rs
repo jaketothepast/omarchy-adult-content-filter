@@ -224,6 +224,35 @@ const REQUIRED_INSTALLED_LINKS: &[(&str, &str)] = &[
     ),
 ];
 
+const INSTALLED_PACKAGE_PATHS: &[&str] = &[
+    "/usr/",
+    "/usr/bin/",
+    "/usr/bin/omarchy-kids-browser-filter-demo",
+    "/usr/lib/",
+    "/usr/lib/omarchy-kids-browser-filter-demo/",
+    "/usr/lib/omarchy-kids-browser-filter-demo/omarchy-kids-browser-filter",
+    "/usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/",
+    "/usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so",
+    "/usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1",
+    "/usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1.27.1",
+    "/usr/share/",
+    "/usr/share/applications/",
+    "/usr/share/applications/omarchy-kids-browser-filter-demo.desktop",
+    "/usr/share/licenses/",
+    "/usr/share/licenses/omarchy-kids-browser-filter-demo/",
+    "/usr/share/licenses/omarchy-kids-browser-filter-demo/NOTICES.md",
+    "/usr/share/licenses/omarchy-kids-browser-filter-demo/nudenet-LICENSE",
+    "/usr/share/licenses/omarchy-kids-browser-filter-demo/nudenet-setup.py",
+    "/usr/share/licenses/omarchy-kids-browser-filter-demo/onnxruntime-LICENSE",
+    "/usr/share/licenses/omarchy-kids-browser-filter-demo/onnxruntime-ThirdPartyNotices.txt",
+    "/usr/share/omarchy-kids-browser-filter-demo/",
+    "/usr/share/omarchy-kids-browser-filter-demo/browser-extension/",
+    "/usr/share/omarchy-kids-browser-filter-demo/browser-extension/cover.css",
+    "/usr/share/omarchy-kids-browser-filter-demo/browser-extension/manifest.json",
+    "/usr/share/omarchy-kids-browser-filter-demo/models/",
+    "/usr/share/omarchy-kids-browser-filter-demo/models/320n.onnx",
+];
+
 struct GuestAcceptanceFixture {
     _temporary_directory: tempfile::TempDir,
     root: PathBuf,
@@ -235,6 +264,7 @@ struct GuestAcceptanceFixture {
     metrics: PathBuf,
     client_state: PathBuf,
     process_state: PathBuf,
+    package_paths: PathBuf,
 }
 
 impl GuestAcceptanceFixture {
@@ -253,6 +283,7 @@ impl GuestAcceptanceFixture {
         let metrics = root.join("launcher metrics.jsonl");
         let client_state = root.join("client state");
         let process_state = root.join("process state");
+        let package_paths = root.join("package paths");
 
         for path in [&artifacts, &fake_bin, &profile_root] {
             fs::create_dir_all(path).unwrap();
@@ -294,12 +325,15 @@ impl GuestAcceptanceFixture {
         write_file(&metrics, &valid_guest_metrics());
         write_file(&client_state, "");
         write_file(&process_state, "111\n");
+        write_file(&package_paths, &(INSTALLED_PACKAGE_PATHS.join("\n") + "\n"));
 
         write_bash_executable(
             &fake_bin.join("pacman"),
-            r#"if [[ $1 == "-Q" ]]; then
+            r#"if [[ $# == 2 && $1 == "-Q" && $2 == "omarchy-kids-browser-filter-demo" ]]; then
   [[ ${FAKE_PACKAGE_PRESENT:-1} == 1 ]]
-elif [[ $1 == "-Qqo" ]]; then
+elif [[ $# == 2 && $1 == "-Qlq" && $2 == "omarchy-kids-browser-filter-demo" ]]; then
+  cat "$FAKE_PACKAGE_PATHS"
+elif [[ $# == 2 && $1 == "-Qqo" ]]; then
   printf '%s\n' "${FAKE_PATH_OWNER:-omarchy-kids-browser-filter-demo}"
 else
   exit 64
@@ -343,7 +377,15 @@ else
 fi
 "#,
         );
-        write_bash_executable(&fake_bin.join("pgrep"), "cat \"$FAKE_PROCESS_STATE\"\n");
+        write_bash_executable(
+            &fake_bin.join("pgrep"),
+            r#"if [[ $# == 3 && $1 == "-f" && $2 == "--" && $3 == "chromium.*omarchy-kids-browser-" ]]; then
+  cat "$FAKE_PROCESS_STATE"
+else
+  exit 64
+fi
+"#,
+        );
         write_bash_executable(
             &fake_bin.join("omarchy-kids-browser-filter-demo"),
             r#"expected=(--images 17 --flagged-index 5 --hold-millis 1500 --assert-no-flash --json)
@@ -379,6 +421,7 @@ exit "${FAKE_LAUNCHER_STATUS:-0}"
             metrics,
             client_state,
             process_state,
+            package_paths,
         }
     }
 
@@ -409,6 +452,7 @@ exit "${FAKE_LAUNCHER_STATUS:-0}"
             .env("FAKE_METRICS", &self.metrics)
             .env("FAKE_CLIENT_STATE", &self.client_state)
             .env("FAKE_PROCESS_STATE", &self.process_state)
+            .env("FAKE_PACKAGE_PATHS", &self.package_paths)
             .env("FAKE_PROFILE_ROOT", &self.profile_root);
         prepend_path(&mut command, &self.fake_bin);
         for (name, value) in extra_environment {
@@ -430,7 +474,7 @@ fn valid_guest_summary() -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        r#"{{"intercepted":17,"continued":16,"replaced":1,"unresolved":0,"clean_shutdown":true,"onnx_runtime_version":"1.27.1","model_sha256":"{MODEL_SHA256}","reveal_latency_millis":500,"no_flash_assertion":{{"requested_hold_millis":1500,"hold_screenshot_count":1,"hold_sampled_pixels":1,"cover_rgba":[17,19,24,255],"safe_fixture_colors_present":16,"placeholder_color_present":true,"original_flagged_color_absent":true}},"dom_images":[{dom_images}]}}"#
+        r#"{{"intercepted":17,"continued":16,"replaced":1,"unresolved":0,"clean_shutdown":true,"onnx_runtime_version":"1.27.1","model_sha256":"{MODEL_SHA256}","reveal_latency_millis":500,"no_flash_assertion":{{"requested_hold_millis":1500,"actual_hold_millis":1500,"hold_screenshot_count":3,"hold_sampled_pixels":1,"cover_rgba":[17,19,24,255],"safe_fixture_colors_present":16,"placeholder_color_present":true,"original_flagged_color_absent":true}},"dom_images":[{dom_images}]}}"#
     ) + "\n"
 }
 
@@ -903,7 +947,7 @@ printf 'ARG=%s\n' "$@"
     }
 }
 
-// Production mutation caught: changing external-acceptance placement, omitting dependency mode,
+// Production mutation caught: changing either wrapper-owned option, omitting dependency mode,
 // or expanding caller arguments changes what the reviewed real QEMU harness receives.
 #[test]
 fn kids_iso_test_canonicalizes_and_forwards_the_external_suite_contract() {
@@ -942,6 +986,7 @@ printf 'ARG=%s\n' "$@"
         [
             "MANAGE=0",
             &format!("ARG={}", iso.display()),
+            "ARG=--refuse-existing-base",
             "ARG=--external-acceptance",
             &format!("ARG={}", package_source.display()),
             "ARG=--reuse-base",
@@ -949,6 +994,42 @@ printf 'ARG=%s\n' "$@"
             "ARG=value with spaces",
             "ARG=",
         ]
+    );
+}
+
+// Production mutation caught: permitting a caller-owned external suite would inject a second
+// hook into the consumer and make the installed Kids acceptance boundary ambiguous.
+#[test]
+fn kids_iso_test_rejects_caller_supplied_external_acceptance_before_delegation() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-test"),
+        "printf 'delegated\\n'\n",
+    );
+    let iso = fixture.path().join("kids-demo.iso");
+    write_file(&iso, "fixture");
+    let package_source = fixture.path().join("package source");
+    fs::create_dir(&package_source).unwrap();
+    let injected_source = fixture.path().join("injected source");
+    fs::create_dir(&injected_source).unwrap();
+
+    let output = run_wrapper(
+        "kids-iso-test",
+        &workspace,
+        &[
+            iso.to_str().unwrap(),
+            "--external-acceptance",
+            injected_source.to_str().unwrap(),
+        ],
+        &[("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path())],
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "ISO harness was delegated to");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "ERROR kids-iso-test: --external-acceptance is managed by this wrapper\n"
     );
 }
 
@@ -1039,106 +1120,8 @@ fn kids_iso_test_rejects_a_missing_package_source_before_delegation() {
     );
 }
 
-// Production mutation caught: starting a fresh install against an existing same-named base risks
-// overwriting or ambiguously reusing preserved VM evidence.
-#[test]
-fn kids_iso_test_refuses_an_existing_base_without_explicit_reuse() {
-    let fixture = tempfile::tempdir().unwrap();
-    let workspace = WorkspacePaths::create_at(fixture.path());
-    write_bash_executable(
-        &workspace.iso.join("bin/omarchy-iso-test"),
-        "printf 'delegated\\n'\n",
-    );
-    let iso = fixture.path().join("kids demo.iso");
-    write_file(&iso, "fixture");
-    let package_source = fixture.path().join("package source");
-    fs::create_dir(&package_source).unwrap();
-    let base = workspace.iso.join("test-runs/kids demo/base.qcow2");
-    write_file(&base, "preserved base");
-
-    let output = run_wrapper(
-        "kids-iso-test",
-        &workspace,
-        &[iso.to_str().unwrap(), "--no-preview"],
-        &[("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path())],
-    );
-
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "ISO harness was delegated to");
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        format!(
-            "ERROR kids-iso-test: reusable base already exists: {}\nUse --reuse-base to use it, or build a uniquely tagged ISO.\n",
-            base.display()
-        )
-    );
-    assert_eq!(fs::read_to_string(base).unwrap(), "preserved base");
-}
-
-// Production mutations caught: omitting either consumer suffix or deriving suffixes in argument
-// order guards the wrong path and exposes the selected encrypted/provisioned base to a fresh install.
-#[test]
-fn kids_iso_test_refuses_each_existing_mode_specific_base_without_reuse() {
-    let fixture = tempfile::tempdir().unwrap();
-    let workspace = WorkspacePaths::create_at(fixture.path());
-    let iso = fixture.path().join("kids-demo.iso");
-    write_file(&iso, "fixture");
-    let package_source = fixture.path().join("package source");
-    fs::create_dir(&package_source).unwrap();
-    write_bash_executable(
-        &workspace.iso.join("bin/omarchy-iso-test"),
-        "printf 'delegated\\n'\nprintf 'overwritten base' >\"$BASE_TO_MUTATE\"\n",
-    );
-    let cases: &[(&[&str], &str)] = &[
-        (&["--encrypt"], "kids-demo-encrypted"),
-        (&["--provision"], "kids-demo-provision"),
-        (
-            &["--provision", "--encrypt"],
-            "kids-demo-encrypted-provision",
-        ),
-    ];
-
-    for (mode_arguments, base_name) in cases {
-        let base = workspace
-            .iso
-            .join("test-runs")
-            .join(base_name)
-            .join("base.qcow2");
-        write_file(&base, "preserved mode base");
-        let mut arguments = vec![iso.to_str().unwrap()];
-        arguments.extend_from_slice(mode_arguments);
-
-        let output = run_wrapper(
-            "kids-iso-test",
-            &workspace,
-            &arguments,
-            &[
-                ("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path()),
-                ("BASE_TO_MUTATE", base.as_path()),
-            ],
-        );
-
-        assert!(
-            !output.status.success(),
-            "mode {mode_arguments:?} delegated a fresh install"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "ISO harness was delegated to for mode {mode_arguments:?}"
-        );
-        assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
-            format!(
-                "ERROR kids-iso-test: reusable base already exists: {}\nUse --reuse-base to use it, or build a uniquely tagged ISO.\n",
-                base.display()
-            )
-        );
-        assert_eq!(fs::read_to_string(base).unwrap(), "preserved mode base");
-    }
-}
-
-// Production mutation caught: deriving the safety path must not reorder, consume, or omit valid
-// mode arguments when no preserved base blocks delegation.
+// Production mutation caught: wrapper-owned flags must not reorder, consume, or omit valid
+// downstream mode arguments.
 #[test]
 fn kids_iso_test_delegates_each_mode_with_exact_original_arguments_when_no_base_exists() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1179,6 +1162,7 @@ fn kids_iso_test_delegates_each_mode_with_exact_original_arguments_when_no_base_
         );
         let mut expected = vec![
             format!("ARG={}", iso.display()),
+            "ARG=--refuse-existing-base".to_owned(),
             "ARG=--external-acceptance".to_owned(),
             format!("ARG={}", package_source.display()),
         ];
@@ -1188,64 +1172,10 @@ fn kids_iso_test_delegates_each_mode_with_exact_original_arguments_when_no_base_
     }
 }
 
-// Production mutation caught: mode suffix handling must not turn a genuine reuse request into a
-// fresh-install refusal or change the selected mode-specific base bytes.
+// Production mutation caught: parsing downstream values or positional ISO replacements in this
+// wrapper can drift from the real consumer and guard a different base than the consumer selects.
 #[test]
-fn kids_iso_test_preserves_each_mode_specific_base_with_genuine_reuse() {
-    let fixture = tempfile::tempdir().unwrap();
-    let workspace = WorkspacePaths::create_at(fixture.path());
-    let iso = fixture.path().join("kids-demo.iso");
-    write_file(&iso, "fixture");
-    let package_source = fixture.path().join("package source");
-    fs::create_dir(&package_source).unwrap();
-    write_bash_executable(
-        &workspace.iso.join("bin/omarchy-iso-test"),
-        "printf 'delegated\\n'\n",
-    );
-    let cases: &[(&[&str], &str)] = &[
-        (&["--encrypt"], "kids-demo-encrypted"),
-        (&["--provision"], "kids-demo-provision"),
-        (
-            &["--provision", "--encrypt"],
-            "kids-demo-encrypted-provision",
-        ),
-    ];
-
-    for (mode_arguments, base_name) in cases {
-        let base = workspace
-            .iso
-            .join("test-runs")
-            .join(base_name)
-            .join("base.qcow2");
-        write_file(&base, "preserved reusable mode base");
-        let mut arguments = vec![iso.to_str().unwrap()];
-        arguments.extend_from_slice(mode_arguments);
-        arguments.push("--reuse-base");
-
-        let output = run_wrapper(
-            "kids-iso-test",
-            &workspace,
-            &arguments,
-            &[("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path())],
-        );
-
-        assert!(
-            output.status.success(),
-            "mode {mode_arguments:?} reuse failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(stdout_lines(&output), ["delegated"]);
-        assert_eq!(
-            fs::read_to_string(base).unwrap(),
-            "preserved reusable mode base"
-        );
-    }
-}
-
-// Production mutation caught: accepting the consumer's later positional replacement silently
-// changes which ISO/base a wrapper invocation can install over after guarding only the first ISO.
-#[test]
-fn kids_iso_test_rejects_a_later_positional_iso_without_delegating_or_mutating_its_base() {
+fn kids_iso_test_leaves_later_positional_iso_and_value_decoy_for_the_consumer() {
     let fixture = tempfile::tempdir().unwrap();
     let workspace = WorkspacePaths::create_at(fixture.path());
     let iso = fixture.path().join("kids-demo.iso");
@@ -1254,11 +1184,9 @@ fn kids_iso_test_rejects_a_later_positional_iso_without_delegating_or_mutating_i
     write_file(&alternate_iso, "alternate fixture");
     let package_source = fixture.path().join("package source");
     fs::create_dir(&package_source).unwrap();
-    let alternate_base = workspace.iso.join("test-runs/alternate demo/base.qcow2");
-    write_file(&alternate_base, "preserved alternate base");
     write_bash_executable(
         &workspace.iso.join("bin/omarchy-iso-test"),
-        "printf 'delegated\\n'\nprintf 'overwritten base' >\"$BASE_TO_MUTATE\"\n",
+        "printf 'ARG=%s\n' \"$@\"\n",
     );
 
     let output = run_wrapper(
@@ -1267,96 +1195,32 @@ fn kids_iso_test_rejects_a_later_positional_iso_without_delegating_or_mutating_i
         &[
             iso.to_str().unwrap(),
             "--memory",
-            "4096",
-            alternate_iso.to_str().unwrap(),
             "--reuse-base",
+            alternate_iso.to_str().unwrap(),
+            "--encrypt",
         ],
-        &[
-            ("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path()),
-            ("BASE_TO_MUTATE", alternate_base.as_path()),
-        ],
+        &[("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path())],
     );
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "ISO harness was delegated to");
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        format!(
-            "ERROR kids-iso-test: unexpected extra ISO argument: {}\n",
-            alternate_iso.display()
-        )
+    assert!(
+        output.status.success(),
+        "downstream arguments were not delegated: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        fs::read_to_string(alternate_base).unwrap(),
-        "preserved alternate base"
+        stdout_lines(&output),
+        [
+            &format!("ARG={}", iso.display()),
+            "ARG=--refuse-existing-base",
+            "ARG=--external-acceptance",
+            &format!("ARG={}", package_source.display()),
+            "ARG=--memory",
+            "ARG=--reuse-base",
+            &format!("ARG={}", alternate_iso.display()),
+            "ARG=--encrypt",
+        ]
     );
 }
-
-// Production mutation caught: token-scanning all forwarded arguments mistakes a value-position
-// `--reuse-base` for the real zero-arity flag and can expose preserved installation evidence to a
-// fresh install.
-#[test]
-fn kids_iso_test_does_not_treat_an_option_value_as_explicit_base_reuse() {
-    let fixture = tempfile::tempdir().unwrap();
-    let workspace = WorkspacePaths::create_at(fixture.path());
-    let iso = fixture.path().join("kids-demo.iso");
-    write_file(&iso, "fixture");
-    let package_source = fixture.path().join("package source");
-    fs::create_dir(&package_source).unwrap();
-    let base = workspace.iso.join("test-runs/kids-demo/base.qcow2");
-    write_file(&base, "preserved base");
-    write_bash_executable(
-        &workspace.iso.join("bin/omarchy-iso-test"),
-        "printf 'delegated\\n'\nprintf 'overwritten base' >\"$BASE_TO_MUTATE\"\n",
-    );
-
-    for value_option in [
-        "--sync-omarchy",
-        "--sync-all",
-        "--external-acceptance",
-        "--port",
-        "--memory",
-        "--timeout",
-    ] {
-        write_file(&base, "preserved base");
-        let output = run_wrapper(
-            "kids-iso-test",
-            &workspace,
-            &[
-                iso.to_str().unwrap(),
-                value_option,
-                "--reuse-base",
-                "--no-preview",
-            ],
-            &[
-                ("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path()),
-                ("BASE_TO_MUTATE", base.as_path()),
-            ],
-        );
-
-        assert!(
-            !output.status.success(),
-            "{value_option} value was treated as real reuse"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "ISO harness was delegated to for {value_option}"
-        );
-        assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
-            format!(
-                "ERROR kids-iso-test: reusable base already exists: {}\nUse --reuse-base to use it, or build a uniquely tagged ISO.\n",
-                base.display()
-            )
-        );
-        assert_eq!(
-            fs::read_to_string(&base).unwrap(),
-            "preserved base",
-            "{value_option} decoy exposed the base to mutation"
-        );
-    }
-}
-
 // Production mutation caught: refusing an explicitly selected reusable base breaks the intended
 // second-phase acceptance run; deleting it would destroy preserved installation evidence.
 #[test]
@@ -1390,6 +1254,7 @@ fn kids_iso_test_preserves_and_delegates_an_explicitly_reused_base() {
         stdout_lines(&output),
         [
             &format!("ARG={}", iso.display()),
+            "ARG=--refuse-existing-base",
             "ARG=--external-acceptance",
             &format!("ARG={}", package_source.display()),
             "ARG=--reuse-base",
@@ -1399,10 +1264,10 @@ fn kids_iso_test_preserves_and_delegates_an_explicitly_reused_base() {
     assert_eq!(fs::read_to_string(base).unwrap(), "preserved base");
 }
 
-// Production mutation caught: omitting an ordinary one-value consumer option from the arity table
-// makes its real value look like unknown syntax and can refuse a later explicit `--reuse-base`.
+// Production mutation caught: interpreting consumer option arities here can consume, reorder, or
+// reject valid downstream values as the consumer evolves.
 #[test]
-fn kids_iso_test_recognizes_reuse_after_each_non_external_value_option() {
+fn kids_iso_test_preserves_each_downstream_value_option_and_later_reuse() {
     let fixture = tempfile::tempdir().unwrap();
     let workspace = WorkspacePaths::create_at(fixture.path());
     write_bash_executable(
@@ -1445,6 +1310,7 @@ fn kids_iso_test_recognizes_reuse_after_each_non_external_value_option() {
             stdout_lines(&output),
             [
                 &format!("ARG={}", iso.display()),
+                "ARG=--refuse-existing-base",
                 "ARG=--external-acceptance",
                 &format!("ARG={}", package_source.display()),
                 &format!("ARG={value_option}"),
@@ -1522,6 +1388,42 @@ fn guest_acceptance_rejects_a_required_path_owned_by_another_package() {
         String::from_utf8(output.stderr).unwrap(),
         "not ok - required path is owned by omarchy-kids-browser-filter-demo: /usr/bin/omarchy-kids-browser-filter-demo\n"
     );
+}
+
+// Production mutation caught: checking only the expected positive paths permits the package to
+// install system integration that would turn the controlled demo into a managed/default browser.
+#[test]
+fn guest_acceptance_rejects_every_unexpected_package_owned_non_directory_path() {
+    let cases = [
+        "/usr/lib/systemd/system/omarchy-kids-browser-filter-demo.service",
+        "/etc/xdg/autostart/omarchy-kids-browser-filter-demo.desktop",
+        "/etc/chromium/policies/managed/omarchy-kids-browser-filter-demo.json",
+        "/usr/share/mime/packages/omarchy-kids-browser-filter-demo.xml",
+        "/usr/share/omarchy-kids-browser-filter-demo/unexpected.dat",
+    ];
+
+    for unexpected in cases {
+        let fixture = GuestAcceptanceFixture::new();
+        write_file(
+            &GuestAcceptanceFixture::rooted(&fixture.install_root, unexpected),
+            "unexpected package integration\n",
+        );
+        let mut package_paths = fs::read_to_string(&fixture.package_paths).unwrap();
+        package_paths.push_str(unexpected);
+        package_paths.push('\n');
+        write_file(&fixture.package_paths, &package_paths);
+
+        let output = fixture.run(&[]);
+
+        assert!(
+            !output.status.success(),
+            "unexpected path passed: {unexpected}"
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("not ok - package contains only expected non-directory paths: {unexpected}\n")
+        );
+    }
 }
 
 // Production mutation caught: enumerating only regular files hides an unexpected symlink in the
@@ -1748,6 +1650,93 @@ fn guest_acceptance_rejects_a_negative_reveal_latency() {
         &valid_guest_summary().replacen(
             "\"reveal_latency_millis\":500",
             "\"reveal_latency_millis\":-1",
+            1,
+        ),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: requested hold duration alone does not prove that the opaque cover
+// actually remained in place for the full reviewed interval.
+#[test]
+fn guest_acceptance_rejects_a_short_actual_cover_hold() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen(
+            "\"actual_hold_millis\":1500",
+            "\"actual_hold_millis\":1499",
+            1,
+        ),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: a missing measured hold must not be accepted as if it were zero or
+// inferred from the requested duration.
+#[test]
+fn guest_acceptance_rejects_a_missing_actual_cover_hold() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen("\"actual_hold_millis\":1500,", "", 1),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: a numeric-looking string is not measured duration evidence.
+#[test]
+fn guest_acceptance_rejects_a_non_numeric_actual_cover_hold() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen(
+            "\"actual_hold_millis\":1500",
+            "\"actual_hold_millis\":\"1500\"",
+            1,
+        ),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: fewer than three hold screenshots under-samples the no-flash
+// interval even when the first and last reported pixels happen to be covered.
+#[test]
+fn guest_acceptance_rejects_too_few_cover_hold_screenshots() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen(
+            "\"hold_screenshot_count\":3",
+            "\"hold_screenshot_count\":2",
             1,
         ),
     );

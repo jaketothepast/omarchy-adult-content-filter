@@ -26,54 +26,13 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/resolve-workspace"
 
-reuse_base=false
-encrypt=false
-provision=false
-forwarded_arguments=("$@")
-argument_index=0
-while ((argument_index < ${#forwarded_arguments[@]})); do
-  argument=${forwarded_arguments[argument_index]}
-  case $argument in
-    --reuse-base)
-      reuse_base=true
-      ;;
-    --encrypt)
-      encrypt=true
-      ;;
-    --provision)
-      provision=true
-      ;;
-    --install-only | --keep-running | --no-preview)
-      ;;
-    --sync-omarchy | --sync-all | --external-acceptance | --port | --memory | --timeout)
-      ((argument_index += 1))
-      if ((argument_index >= ${#forwarded_arguments[@]})); then
-        reuse_base=false
-        break
-      fi
-      ;;
-    -*)
-      reuse_base=false
-      break
-      ;;
-    *)
-      echo "ERROR kids-iso-test: unexpected extra ISO argument: $argument" >&2
-      exit 1
-      ;;
-  esac
-  ((argument_index += 1))
+for argument in "$@"; do
+  if [[ $argument == "--external-acceptance" ]]; then
+    echo "ERROR kids-iso-test: --external-acceptance is managed by this wrapper" >&2
+    exit 1
+  fi
 done
-
-base_name=$(basename "$iso" .iso)
-[[ $encrypt == true ]] && base_name+="-encrypted"
-[[ $provision == true ]] && base_name+="-provision"
-base="$OMARCHY_ISO_PATH/test-runs/$base_name/base.qcow2"
-if [[ $reuse_base == false && -e $base ]]; then
-  echo "ERROR kids-iso-test: reusable base already exists: $base" >&2
-  echo "Use --reuse-base to use it, or build a uniquely tagged ISO." >&2
-  exit 1
-fi
 
 export OMARCHY_ISO_MANAGE_HOST_DEPS=0
 exec "$OMARCHY_ISO_PATH/bin/omarchy-iso-test" \
-  "$iso" --external-acceptance "$OMARCHY_KIDS_PACKAGE_SOURCE" "$@"
+  "$iso" --refuse-existing-base --external-acceptance "$OMARCHY_KIDS_PACKAGE_SOURCE" "$@"

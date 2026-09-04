@@ -43,6 +43,12 @@ required_files=(
   /usr/share/licenses/omarchy-kids-browser-filter-demo/nudenet-setup.py
 )
 
+allowed_non_directory_paths=(
+  "${required_files[@]}"
+  /usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1
+  /usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so
+)
+
 for path in "${required_files[@]}"; do
   [[ -f $(installed_path "$path") && ! -L $(installed_path "$path") ]] || fail "required installed path exists: $path"
 done
@@ -83,6 +89,28 @@ runtime_link=$(installed_path /usr/lib/omarchy-kids-browser-filter-demo/onnxrunt
 [[ -L $runtime_link ]] || fail "required installed path exists: /usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so"
 [[ $(readlink "$runtime_link") == "libonnxruntime.so.1" ]] || fail "ONNX Runtime unversioned symlink is exact"
 assert_metadata /usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so 777
+
+package_listing=$(pacman -Qlq "$PACKAGE") || fail "package file list is available"
+mapfile -t package_paths <<< "$package_listing"
+for path in "${package_paths[@]}"; do
+  [[ -n $path ]] || continue
+  rooted_path=$(installed_path "$path")
+  if [[ -d $rooted_path && ! -L $rooted_path ]]; then
+    continue
+  fi
+
+  allowed=false
+  for allowed_path in "${allowed_non_directory_paths[@]}"; do
+    if [[ $path == "$allowed_path" ]]; then
+      allowed=true
+      break
+    fi
+  done
+  if ! $allowed; then
+    fail "package contains only expected non-directory paths: $path"
+  fi
+done
+pass "package contains only expected non-directory paths"
 
 pass "required installed paths and extension contents are complete"
 
@@ -140,7 +168,8 @@ jq -e '
   .model_sha256 == "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f" and
   (.reveal_latency_millis | type == "number" and . >= 0 and . <= 500) and
   .no_flash_assertion.requested_hold_millis == 1500 and
-  .no_flash_assertion.hold_screenshot_count >= 1 and
+  (.no_flash_assertion.actual_hold_millis | type == "number" and . >= 1500) and
+  (.no_flash_assertion.hold_screenshot_count | type == "number" and . >= 3) and
   .no_flash_assertion.hold_sampled_pixels > 0 and
   .no_flash_assertion.cover_rgba == [17,19,24,255] and
   .no_flash_assertion.safe_fixture_colors_present == 16 and
