@@ -1551,6 +1551,15 @@ mod tests {
                 "html:not([data-omarchy-kids-ready]) > * {\n",
                 "  visibility: hidden !important;\n",
                 "}\n",
+                "\n",
+                "html[data-omarchy-kids-media-blocked] video {\n",
+                "  visibility: hidden !important;\n",
+                "}\n",
+                "\n",
+                "html[data-omarchy-kids-media-blocked] [data-omarchy-kids-blocked-media-trigger] {\n",
+                "  cursor: not-allowed !important;\n",
+                "  pointer-events: none !important;\n",
+                "}\n",
             )
         );
     }

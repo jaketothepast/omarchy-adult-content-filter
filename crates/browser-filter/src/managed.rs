@@ -12,8 +12,8 @@ use chromiumoxide::{
         fetch::{EventRequestPaused, GetResponseBodyParams, RequestId},
         network::{EventRequestWillBeSent, LoaderId, RequestId as NetworkRequestId},
         page::{
-            EventFrameNavigated, EventLifecycleEvent, GetFrameTreeParams, NavigateParams,
-            SetLifecycleEventsEnabledParams,
+            AddScriptToEvaluateOnNewDocumentParams, EventFrameNavigated, EventLifecycleEvent,
+            GetFrameTreeParams, NavigateParams, SetLifecycleEventsEnabledParams,
         },
         target::{CloseTargetParams, EventTargetCreated, EventTargetDestroyed, TargetId},
     },
@@ -186,8 +186,86 @@ fn discardable_obsolete_interception(
     current_loader: &str,
 ) -> bool {
     invalid_interception_error(error)
-        && request_loader.is_some()
+        && request_loader.is_some_and(|loader| !loader.is_empty())
         && request_loader != Some(current_loader)
+}
+
+const MEDIA_GUARD_BOOTSTRAP: &str = r#"(() => {
+    if (globalThis.__omarchyKidsBlockMediaForImage) return true;
+    const blockedUrls = new Set();
+    const imageIsBlocked = image =>
+        image.hasAttribute("data-omarchy-kids-blocked-image") ||
+        blockedUrls.has(image.currentSrc) ||
+        blockedUrls.has(image.src);
+    const apply = () => {
+        const root = document.documentElement;
+        if (!root || blockedUrls.size === 0) return;
+        if (!root.hasAttribute("data-omarchy-kids-media-blocked")) {
+            root.setAttribute("data-omarchy-kids-media-blocked", "");
+        }
+        for (const image of document.images) {
+            if (imageIsBlocked(image)) {
+                image.setAttribute("data-omarchy-kids-blocked-image", "");
+                const action = image.closest("a,button,[role='button']");
+                if (action) action.setAttribute("data-omarchy-kids-blocked-media-trigger", "");
+            }
+        }
+        for (const video of document.querySelectorAll("video")) {
+            video.removeAttribute("autoplay");
+            video.pause();
+        }
+    };
+    const connectedToBlockedImage = target => {
+        if (!(target instanceof Element)) return false;
+        const action = target.closest("a,button,[role='button']");
+        if (!action) return target.matches("img") && imageIsBlocked(target);
+        return action.hasAttribute("data-omarchy-kids-blocked-media-trigger") ||
+            Array.from(action.querySelectorAll("img")).some(imageIsBlocked);
+    };
+    const blockConnectedAction = event => {
+        if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
+        if (document.documentElement?.hasAttribute("data-omarchy-kids-media-blocked") &&
+            connectedToBlockedImage(event.target)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        }
+    };
+    const stopVideo = event => {
+        if (document.documentElement?.hasAttribute("data-omarchy-kids-media-blocked") &&
+            event.target instanceof HTMLVideoElement) {
+            event.target.pause();
+        }
+    };
+    window.addEventListener("click", blockConnectedAction, true);
+    window.addEventListener("auxclick", blockConnectedAction, true);
+    window.addEventListener("keydown", blockConnectedAction, true);
+    window.addEventListener("play", stopVideo, true);
+    new MutationObserver(apply).observe(document, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-omarchy-kids-media-blocked"]
+    });
+    const blockMediaForImage = blockedUrl => {
+        blockedUrls.add(blockedUrl);
+        apply();
+        return document.documentElement?.hasAttribute("data-omarchy-kids-media-blocked") &&
+            Array.from(document.querySelectorAll("video")).every(video => video.paused);
+    };
+    Object.defineProperty(globalThis, "__omarchyKidsBlockMediaForImage", {
+        value: blockMediaForImage,
+        configurable: false,
+        writable: false
+    });
+    return true;
+})()"#;
+
+fn media_block_expression(blocked_url: &str) -> Result<String> {
+    let encoded_url = serde_json::to_string(blocked_url)
+        .context("failed to encode a blocked image URL for the media guard")?;
+    Ok(format!(
+        "globalThis.__omarchyKidsBlockMediaForImage({encoded_url})"
+    ))
 }
 
 const MAX_REQUEST_LOADER_RECORDS: usize = 1024;
@@ -231,6 +309,7 @@ struct ManualCounts {
     replaced: usize,
     failed_closed: usize,
     canceled: usize,
+    media_blocked_documents: usize,
 }
 
 #[derive(Default)]
@@ -293,13 +372,18 @@ struct ManualPageState {
     loaded_loader: Option<String>,
     ledger: ManualPauseLedger,
     request_loaders: RequestLoaderLedger,
+    media_blocked_loader: Option<String>,
     counts: ManualCounts,
 }
 
 impl ManualPageState {
     fn navigation_started(&mut self, loader_id: &str) {
+        if self.active_loader.as_deref() == Some(loader_id) {
+            return;
+        }
         self.active_loader = Some(loader_id.to_owned());
         self.loaded_loader = None;
+        self.media_blocked_loader = None;
     }
 
     fn begin_response(&mut self, request_id: &RequestId) -> Result<()> {
@@ -311,6 +395,22 @@ impl ManualPageState {
         self.counts.intercepted += 1;
         self.counts.canceled += 1;
         Ok(())
+    }
+
+    fn mark_media_blocked(&mut self, loader_id: &str) -> bool {
+        if self.active_loader.as_deref() != Some(loader_id)
+            || self.media_blocked_loader.as_deref() == Some(loader_id)
+        {
+            return false;
+        }
+        self.media_blocked_loader = Some(loader_id.to_owned());
+        self.counts.media_blocked_documents += 1;
+        true
+    }
+
+    #[cfg(test)]
+    fn media_blocked(&self) -> bool {
+        self.active_loader.is_some() && self.active_loader == self.media_blocked_loader
     }
 
     fn load_completed(&mut self, loader_id: &str) -> bool {
@@ -338,6 +438,7 @@ pub struct ManagedBrowserSummary {
     pub replaced: usize,
     pub failed_closed: usize,
     pub canceled: usize,
+    pub media_blocked_documents: usize,
     pub blocked_extra_pages: usize,
     pub unresolved: usize,
     pub clean_shutdown: bool,
@@ -534,6 +635,7 @@ async fn managed_event_loop(
     .await?
     .context("failed to register Target.targetDestroyed listener")?;
 
+    install_media_guard(&page, config.acquisition_timeout).await?;
     within(
         config.acquisition_timeout,
         page.execute(SetLifecycleEventsEnabledParams::new(true)),
@@ -656,6 +758,7 @@ async fn managed_event_loop(
         replaced: state.counts.replaced,
         failed_closed: state.counts.failed_closed,
         canceled: state.counts.canceled,
+        media_blocked_documents: state.counts.media_blocked_documents,
         blocked_extra_pages,
         unresolved: state.ledger.unresolved_count(),
         clean_shutdown: false,
@@ -781,6 +884,34 @@ async fn reveal_current_document(page: &Page, deadline: Duration) -> Result<()> 
     Ok(())
 }
 
+async fn install_media_guard(page: &Page, deadline: Duration) -> Result<()> {
+    let params = AddScriptToEvaluateOnNewDocumentParams {
+        source: MEDIA_GUARD_BOOTSTRAP.to_owned(),
+        world_name: None,
+        include_command_line_api: None,
+        run_immediately: Some(true),
+    };
+    within(
+        deadline,
+        page.execute(params),
+        "managed media guard installation deadline elapsed",
+    )
+    .await?
+    .context("failed to install the managed media guard")?;
+    let result = within(
+        deadline,
+        page.evaluate("typeof globalThis.__omarchyKidsBlockMediaForImage === 'function'"),
+        "managed media guard verification deadline elapsed",
+    )
+    .await?
+    .context("failed to verify the managed media guard")?;
+    let installed = result
+        .into_value::<bool>()
+        .context("managed media guard verification had an unexpected shape")?;
+    anyhow::ensure!(installed, "managed media guard was not installed");
+    Ok(())
+}
+
 async fn process_managed_pause(
     page: &Page,
     event: &EventRequestPaused,
@@ -793,6 +924,13 @@ async fn process_managed_pause(
     state.begin_response(&event.request_id)?;
     let classification =
         prepare_managed_classification(page, event, detector_session, policy, config).await;
+    let request_loader = request_loader_for(
+        event.network_id.as_ref(),
+        requests,
+        &mut state.request_loaders,
+        config.acquisition_timeout,
+    )
+    .await;
     let replace = classification != Classification::Allow;
     let resolution = if replace {
         match within(
@@ -820,31 +958,36 @@ async fn process_managed_pause(
         }
     };
     if let Err(error) = resolution {
-        if invalid_interception_error(&error) {
-            let request_loader = request_loader_for(
-                event.network_id.as_ref(),
-                requests,
-                &mut state.request_loaders,
-                config.acquisition_timeout,
-            )
-            .await;
-            if let Ok((_, current_loader)) =
+        if invalid_interception_error(&error)
+            && let Ok((_, current_loader)) =
                 current_main_frame(page, config.acquisition_timeout).await
-                && discardable_obsolete_interception(
-                    &error,
-                    request_loader.as_ref().map(LoaderId::as_ref),
-                    current_loader.as_ref(),
-                )
-            {
-                state.cancel_obsolete(&event.request_id)?;
-                return Ok(());
-            }
+            && discardable_obsolete_interception(
+                &error,
+                request_loader.as_ref().map(LoaderId::as_ref),
+                current_loader.as_ref(),
+            )
+        {
+            state.cancel_obsolete(&event.request_id)?;
+            return Ok(());
         }
         return Err(error).context(if replace {
             "failed to fulfill a managed image response"
         } else {
             "failed to continue a managed image response"
         });
+    }
+    if replace {
+        let request_loader = request_loader
+            .as_ref()
+            .filter(|loader| !loader.as_ref().is_empty())
+            .context("replaced image response had no document loader identity")?;
+        let (_, current_loader) = current_main_frame(page, config.acquisition_timeout).await?;
+        if request_loader == &current_loader {
+            block_media_for_current_document(page, &event.request.url, config.acquisition_timeout)
+                .await?;
+            state.navigation_started(current_loader.as_ref());
+            state.mark_media_blocked(current_loader.as_ref());
+        }
     }
     state.ledger.resolved(&event.request_id)?;
     state.counts.intercepted += 1;
@@ -856,6 +999,26 @@ async fn process_managed_pause(
     if classification == Classification::ReplaceFailedClosed {
         state.counts.failed_closed += 1;
     }
+    Ok(())
+}
+
+async fn block_media_for_current_document(
+    page: &Page,
+    blocked_url: &str,
+    deadline: Duration,
+) -> Result<()> {
+    let expression = media_block_expression(blocked_url)?;
+    let result = within(
+        deadline,
+        page.evaluate(expression),
+        "managed media blocking deadline elapsed",
+    )
+    .await?
+    .context("failed to install managed media blocking")?;
+    let blocked = result
+        .into_value::<bool>()
+        .context("managed media blocking result had an unexpected shape")?;
+    anyhow::ensure!(blocked, "managed media blocking was not applied");
     Ok(())
 }
 
@@ -945,9 +1108,10 @@ mod tests {
     };
 
     use super::{
-        Classification, ManagedBrowserConfig, ManagedBrowserSummary, ManualCounts, ManualPageState,
-        ManualPauseLedger, RequestLoaderLedger, ResponsePlan, TargetAction, classification_for,
-        discardable_obsolete_interception, response_plan, reveal_failure_is_stale, settle_decision,
+        Classification, MEDIA_GUARD_BOOTSTRAP, ManagedBrowserConfig, ManagedBrowserSummary,
+        ManualCounts, ManualPageState, ManualPauseLedger, RequestLoaderLedger, ResponsePlan,
+        TargetAction, classification_for, discardable_obsolete_interception,
+        media_block_expression, response_plan, reveal_failure_is_stale, settle_decision,
         should_reveal, supports_complete_frame_analysis, target_action,
     };
 
@@ -1250,6 +1414,11 @@ mod tests {
             "loader-current"
         ));
         assert!(!discardable_obsolete_interception(
+            &invalid,
+            Some(""),
+            "loader-current"
+        ));
+        assert!(!discardable_obsolete_interception(
             &anyhow::anyhow!("transport failed"),
             Some("loader-old"),
             "loader-current"
@@ -1302,6 +1471,7 @@ mod tests {
             replaced: 2,
             failed_closed: 1,
             canceled: 1,
+            media_blocked_documents: 1,
             blocked_extra_pages: 0,
             unresolved: 0,
             clean_shutdown: true,
@@ -1318,6 +1488,7 @@ mod tests {
                 "continued",
                 "failed_closed",
                 "intercepted",
+                "media_blocked_documents",
                 "model_sha256",
                 "onnx_runtime_version",
                 "replaced",
@@ -1418,6 +1589,49 @@ mod tests {
         assert_eq!(state.counts.continued, 0);
         assert_eq!(state.counts.replaced, 0);
         assert_eq!(state.counts.failed_closed, 0);
+    }
+
+    #[test]
+    fn media_blocking_is_counted_once_per_document_and_resets_on_navigation() {
+        let mut state = ManualPageState::default();
+        state.navigation_started("loader-a");
+        assert!(state.mark_media_blocked("loader-a"));
+        assert!(!state.mark_media_blocked("loader-a"));
+        assert_eq!(state.counts.media_blocked_documents, 1);
+
+        state.navigation_started("loader-b");
+        assert!(!state.media_blocked());
+        assert!(!state.mark_media_blocked("loader-a"));
+        assert!(state.mark_media_blocked("loader-b"));
+        assert_eq!(state.counts.media_blocked_documents, 2);
+    }
+
+    #[test]
+    fn media_block_expression_binds_the_url_and_guards_video_and_connected_actions() {
+        let url = "https://example.test/a'\"\\image.png";
+        let expression = media_block_expression(url).unwrap();
+        let encoded_url = serde_json::to_string(url).unwrap();
+
+        assert_eq!(
+            expression,
+            format!("globalThis.__omarchyKidsBlockMediaForImage({encoded_url})")
+        );
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("document.querySelectorAll(\"video\")"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("video.pause()"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("window.addEventListener(\"click\""));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("window.addEventListener(\"auxclick\""));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("window.addEventListener(\"keydown\""));
+        assert!(
+            MEDIA_GUARD_BOOTSTRAP
+                .contains("event.type === \"keydown\" && ![\"Enter\", \" \"].includes(event.key)")
+        );
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("event.preventDefault()"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("event.stopImmediatePropagation()"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("data-omarchy-kids-media-blocked"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("data-omarchy-kids-blocked-media-trigger"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("new MutationObserver(apply)"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("attributes: true"));
+        assert!(MEDIA_GUARD_BOOTSTRAP.contains("Object.defineProperty(globalThis"));
     }
 
     #[test]

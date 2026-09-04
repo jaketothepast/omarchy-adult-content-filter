@@ -5,3 +5,12 @@ html:not([data-omarchy-kids-ready]) {
 html:not([data-omarchy-kids-ready]) > * {
   visibility: hidden !important;
 }
+
+html[data-omarchy-kids-media-blocked] video {
+  visibility: hidden !important;
+}
+
+html[data-omarchy-kids-media-blocked] [data-omarchy-kids-blocked-media-trigger] {
+  cursor: not-allowed !important;
+  pointer-events: none !important;
+}
