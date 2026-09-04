@@ -67,7 +67,6 @@ let
     jq
     mtools
     openssh
-    openssl
     procps
     python3
     qemu
@@ -140,7 +139,7 @@ in
     name = "iso-integration";
     description = "Run the Omarchy ISO integration scenarios with Nix-managed host tools";
     command = scriptCommand "iso-integration";
-    runtimeInputs = isoVmInputs;
+    runtimeInputs = isoVmInputs ++ [ pkgs.openssl ];
     runtimeEnvironment = firmwareEnvironment;
   };
 }
