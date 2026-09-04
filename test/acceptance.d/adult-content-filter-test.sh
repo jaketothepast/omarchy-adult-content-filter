@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=../lib/adult-content-filter-process.sh
+source "$SCRIPT_DIR/../lib/adult-content-filter-process.sh"
+
 PACKAGE=omarchy-adult-content-filter
 INSTALL_ROOT=${OMARCHY_ADULT_FILTER_INSTALL_ROOT:-}
 ARTIFACTS=${OMARCHY_ACCEPTANCE_DIR:-/tmp/omarchy-external-acceptance}
@@ -117,8 +121,6 @@ policy_hash=${policy_hash%% *}
 pass "installed model and adult-domain policy identities are pinned"
 
 baseline_clients=$(hyprctl -j clients) || fail "managed browser launcher exits successfully"
-baseline_addresses=$(jq -c '[.[] | select((.class // "") | test("(?i)chromium")) | .address]' <<<"$baseline_clients") || fail "managed browser launcher exits successfully"
-baseline_pids=$(pgrep -f -- 'chromium.*omarchy-adult-content-filter' || true)
 managed_summary="$ARTIFACTS/managed-browser-summary.json"
 managed_metrics="$ARTIFACTS/managed-browser-metrics.jsonl"
 
@@ -129,14 +131,10 @@ browser_pid=
 client_deadline=$((SECONDS + ${OMARCHY_ADULT_FILTER_CLIENT_TIMEOUT:-60}))
 while kill -0 "$managed_pid" 2>/dev/null; do
   current_clients=$(hyprctl -j clients 2>/dev/null || printf '[]\n')
-  managed_address=$(jq -r --argjson baseline "$baseline_addresses" '([.[] | select((.class // "") | test("(?i)chromium")) | .address] - $baseline) | first // empty' <<<"$current_clients")
-  while IFS= read -r pid; do
-    [[ -n $pid ]] || continue
-    if ! grep -Fx -- "$pid" <<<"$baseline_pids" >/dev/null && tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | grep -Fx -- '--disable-dev-tools' >/dev/null; then
-      browser_pid=$pid
-      break
-    fi
-  done < <(pgrep -f -- 'chromium.*omarchy-adult-content-filter' || true)
+  managed_client=$(adult_filter_new_chromium_client "$baseline_clients" "$current_clients")
+  if [[ -n $managed_client ]]; then
+    IFS=$'\t' read -r managed_address browser_pid <<<"$managed_client"
+  fi
   if [[ -n $managed_address && -n $browser_pid ]]; then
     break
   fi
@@ -147,17 +145,25 @@ done
 [[ -n $managed_address && -n $browser_pid ]] || {
   kill "$managed_pid" 2>/dev/null || true
   wait "$managed_pid" 2>/dev/null || true
-  fail "managed browser launcher exits successfully"
+  fail "managed browser window and PID are observed"
 }
-browser_arguments=$(tr '\0' '\n' <"/proc/$browser_pid/cmdline")
-grep -Fx -- '--disable-dev-tools' <<<"$browser_arguments" >/dev/null || fail "managed browser launcher exits successfully"
-grep -Fx -- '--ozone-platform=wayland' <<<"$browser_arguments" >/dev/null || fail "managed browser launcher exits successfully"
-grep -E -- '^--user-data-dir=.*/omarchy-adult-content-filter/omarchy-kids-browser-' <<<"$browser_arguments" >/dev/null || fail "managed browser launcher exits successfully"
+browser_cmdline=/proc/$browser_pid/cmdline
+adult_filter_cmdline_has_exact_argument "$browser_cmdline" --disable-dev-tools || fail "managed browser disables developer tools"
+adult_filter_cmdline_has_exact_argument "$browser_cmdline" --ozone-platform=wayland || fail "managed browser uses native Wayland"
+adult_filter_cmdline_has_argument_prefix \
+  "$browser_cmdline" \
+  --user-data-dir=/run/user/1000/omarchy-adult-content-filter/omarchy-kids-browser- || fail "managed browser uses its private disposable profile"
 
-hyprctl dispatch closewindow "address:$managed_address" >/dev/null || fail "managed browser launcher exits successfully"
+if ! close_result=$(adult_filter_close_window "$managed_address" 2>&1); then
+  printf 'managed browser close failed for %s: %s\n' "$managed_address" "$close_result" >&2
+  fail "managed browser window accepts a close request"
+fi
 managed_status=0
 wait "$managed_pid" || managed_status=$?
-((managed_status == 0)) || fail "managed browser launcher exits successfully"
+if ((managed_status != 0)); then
+  printf 'managed browser launcher exit status: %d\n' "$managed_status" >&2
+  fail "managed browser launcher exits successfully"
+fi
 jq -e '
   .blocklist_entries == 76767 and
   .domain_blocked_requests == 0 and
@@ -168,7 +174,7 @@ jq -e '
   .clean_shutdown == true and
   .onnx_runtime_version == "1.27.1" and
   .model_sha256 == "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f"
-' "$managed_summary" >/dev/null 2>&1 || fail "managed browser launcher exits successfully"
+' "$managed_summary" >/dev/null 2>&1 || fail "managed browser launcher emits its clean private-browser summary"
 pass "managed browser launcher exits successfully"
 
 summary="$ARTIFACTS/browser-filter-summary.json"

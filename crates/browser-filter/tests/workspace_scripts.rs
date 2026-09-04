@@ -997,6 +997,10 @@ fn adult_filter_acceptance_entry_points_are_product_named_and_browser_only() {
         "/usr/bin/omarchy-adult-content-filter",
         "/usr/lib/omarchy-adult-content-filter/omarchy-adult-content-filter",
         "/usr/share/omarchy-adult-content-filter/policies/adult-domains.hosts",
+        "source \"$SCRIPT_DIR/../lib/adult-content-filter-process.sh\"",
+        "adult_filter_new_chromium_client \"$baseline_clients\" \"$current_clients\"",
+        "adult_filter_cmdline_has_exact_argument \"$browser_cmdline\" --disable-dev-tools",
+        "adult_filter_close_window \"$managed_address\"",
         "managed browser launcher exits successfully",
         "controlled detector proof exits successfully",
     ] {
@@ -1034,6 +1038,143 @@ fn adult_filter_acceptance_entry_points_are_product_named_and_browser_only() {
     assert!(readme.starts_with("# Omarchy Adult Content Filter\n"));
     assert!(readme.contains("browser-only"));
     assert!(readme.contains("does not prevent a user from launching another browser"));
+}
+
+#[test]
+fn adult_filter_acceptance_recognizes_chromium_rewritten_process_arguments() {
+    let fixture = tempfile::tempdir().unwrap();
+    let helper = repository_root().join("test/lib/adult-content-filter-process.sh");
+    let ordinary = fixture.path().join("ordinary-cmdline");
+    let rewritten = fixture.path().join("rewritten-cmdline");
+    fs::write(
+        &ordinary,
+        b"/usr/lib/chromium/chromium\0--disable-dev-tools\0--ozone-platform=wayland\0--user-data-dir=/run/user/1000/omarchy-adult-content-filter/omarchy-kids-browser-safe\0",
+    )
+    .unwrap();
+    fs::write(
+        &rewritten,
+        b"/usr/lib/chromium/chromium --disable-dev-tools --ozone-platform=wayland --user-data-dir=/run/user/1000/omarchy-adult-content-filter/omarchy-kids-browser-safe\0",
+    )
+    .unwrap();
+
+    for cmdline in [&ordinary, &rewritten] {
+        let script = r#"
+set -euo pipefail
+source "$HELPER"
+adult_filter_cmdline_has_exact_argument "$CMDLINE" --disable-dev-tools
+adult_filter_cmdline_has_exact_argument "$CMDLINE" --ozone-platform=wayland
+adult_filter_cmdline_has_argument_prefix \
+  "$CMDLINE" \
+  --user-data-dir=/run/user/1000/omarchy-adult-content-filter/omarchy-kids-browser-
+! adult_filter_cmdline_has_exact_argument "$CMDLINE" --disable-dev
+! adult_filter_cmdline_has_exact_argument "$CMDLINE" --disable-dev-tools-bypass
+! adult_filter_cmdline_has_argument_prefix "$CMDLINE" --user-data-dir=/tmp/unmanaged-
+"#;
+        let output = Command::new("bash")
+            .args(["-c", script])
+            .env("HELPER", &helper)
+            .env("CMDLINE", cmdline)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cmdline helper rejected {}: {}",
+            cmdline.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn adult_filter_acceptance_correlates_a_new_hyprland_client_by_address_and_pid() {
+    let helper = repository_root().join("test/lib/adult-content-filter-process.sh");
+    let baseline = r#"[{"address":"0xabc","class":"chromium","pid":40}]"#;
+    let current = r#"[
+      {"address":"0xabc","class":"chromium","pid":41},
+      {"address":"0xdef","class":"foot","pid":42}
+    ]"#;
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"set -euo pipefail
+source "$HELPER"
+adult_filter_new_chromium_client "$BASELINE" "$CURRENT"
+"#,
+        ])
+        .env("HELPER", helper)
+        .env("BASELINE", baseline)
+        .env("CURRENT", current)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "client correlation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "0xabc\t41\n");
+}
+
+#[test]
+fn adult_filter_acceptance_closes_the_exact_window_with_current_hyprland_dispatch() {
+    let fixture = tempfile::tempdir().unwrap();
+    let helper = repository_root().join("test/lib/adult-content-filter-process.sh");
+    let fake_bin = fixture.path().join("bin");
+    let capture = fixture.path().join("hyprctl-arguments");
+    write_bash_executable(
+        &fake_bin.join("hyprctl"),
+        r#"printf '%s\0' "$@" >"$HYPRCTL_CAPTURE"
+"#,
+    );
+
+    let mut command = Command::new("bash");
+    command
+        .args([
+            "-c",
+            r#"set -euo pipefail
+source "$HELPER"
+adult_filter_close_window 0xabc123
+"#,
+        ])
+        .env("HELPER", &helper)
+        .env("HYPRCTL_CAPTURE", &capture);
+    prepend_path(&mut command, &fake_bin);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "current Hyprland close failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let arguments = fs::read(&capture)
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        arguments,
+        [
+            "dispatch",
+            "hl.dsp.window.close({ window = \"address:0xabc123\" })"
+        ]
+    );
+
+    fs::remove_file(&capture).unwrap();
+    let mut invalid_command = Command::new("bash");
+    invalid_command
+        .args([
+            "-c",
+            r#"set -euo pipefail
+source "$HELPER"
+adult_filter_close_window '0xabc\"); os.execute("false")'
+"#,
+        ])
+        .env("HELPER", helper)
+        .env("HYPRCTL_CAPTURE", &capture);
+    prepend_path(&mut invalid_command, &fake_bin);
+    let invalid = invalid_command.output().unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(!capture.exists(), "invalid address reached hyprctl");
 }
 
 // Production mutation caught: falling through to the upstream interactive selector makes a
