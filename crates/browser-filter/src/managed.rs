@@ -40,6 +40,10 @@ use crate::{
 
 const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn managed_chromium_argument() -> (&'static str, &'static str) {
+    ("ozone-platform", "wayland")
+}
+
 #[derive(Debug)]
 pub struct ManagedBrowserConfig {
     start_url: Option<Url>,
@@ -250,6 +254,41 @@ fn classification_for(
 
 fn should_reveal(load_seen: bool, unresolved_responses: usize) -> bool {
     load_seen && unresolved_responses == 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationDecision {
+    ContinueMainFrame,
+    IgnoreSubframe,
+    DenyMainFrame,
+}
+
+fn navigation_decision(is_subframe: bool, raw_url: &str) -> NavigationDecision {
+    if is_subframe {
+        return NavigationDecision::IgnoreSubframe;
+    }
+    if Url::parse(raw_url)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+    {
+        NavigationDecision::ContinueMainFrame
+    } else {
+        NavigationDecision::DenyMainFrame
+    }
+}
+
+fn apply_navigation_decision(
+    decision: NavigationDecision,
+    loader_id: &str,
+    state: &mut ManualPageState,
+) -> Result<()> {
+    match decision {
+        NavigationDecision::ContinueMainFrame => state.navigation_started(loader_id),
+        NavigationDecision::IgnoreSubframe => {}
+        NavigationDecision::DenyMainFrame => {
+            anyhow::bail!("managed top-level navigation was denied")
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -601,6 +640,21 @@ impl ManagedBrowser {
     }
 }
 
+fn build_managed_browser_config(config: &ManagedBrowserConfig) -> Result<BrowserConfig> {
+    BrowserConfig::builder()
+        .chrome_executable(&config.chromium_bin)
+        .with_head()
+        .arg(managed_chromium_argument())
+        .user_data_dir(&config.profile_dir)
+        .extension(config.extension_dir.display().to_string())
+        .window_size(1280, 800)
+        .launch_timeout(config.lifecycle_timeout)
+        .request_timeout(config.acquisition_timeout)
+        .disable_cache()
+        .build()
+        .map_err(anyhow::Error::msg)
+}
+
 async fn run_managed_browser(
     managed: ManagedBrowser,
     config: ManagedBrowserConfig,
@@ -610,17 +664,7 @@ async fn run_managed_browser(
         policy,
         request_policy,
     } = managed;
-    let browser_config = BrowserConfig::builder()
-        .chrome_executable(&config.chromium_bin)
-        .with_head()
-        .user_data_dir(&config.profile_dir)
-        .extension(config.extension_dir.display().to_string())
-        .window_size(1280, 800)
-        .launch_timeout(config.lifecycle_timeout)
-        .request_timeout(config.acquisition_timeout)
-        .disable_cache()
-        .build()
-        .map_err(anyhow::Error::msg)?;
+    let browser_config = build_managed_browser_config(&config)?;
     let detector_session = HeadedDetectorSession::start(detector);
 
     let browser_result = match Browser::launch(browser_config).await {
@@ -884,9 +928,11 @@ async fn managed_event_loop(
             }
             event = frames.next() => {
                 let Some(event) = event else { break; };
-                if event.frame.parent_id.is_none() {
-                    state.navigation_started(event.frame.loader_id.as_ref());
-                }
+                apply_navigation_decision(
+                    navigation_decision(event.frame.parent_id.is_some(), &event.frame.url),
+                    event.frame.loader_id.as_ref(),
+                    &mut state,
+                )?;
             }
             event = lifecycle.next() => {
                 let Some(event) = event else { break; };
@@ -1350,7 +1396,7 @@ async fn prepare_managed_classification(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::Duration};
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
     use chromiumoxide::cdp::browser_protocol::{
         fetch::RequestId,
@@ -1366,11 +1412,13 @@ mod tests {
 
     use super::{
         Classification, MEDIA_GUARD_BOOTSTRAP, ManagedBrowserConfig, ManagedBrowserSummary,
-        ManualCounts, ManualPageState, ManualPauseLedger, PauseStage, RequestLayerOutcome,
-        RequestLoaderLedger, ResponsePlan, TargetAction, classification_for,
-        discardable_obsolete_interception, media_block_expression, network_headers, pause_stage,
-        request_command, response_plan, reveal_failure_is_stale, settle_decision,
-        settle_request_decision, should_reveal, supports_complete_frame_analysis, target_action,
+        ManualCounts, ManualPageState, ManualPauseLedger, NavigationDecision, PauseStage,
+        RequestLayerOutcome, RequestLoaderLedger, ResponsePlan, TargetAction,
+        apply_navigation_decision, build_managed_browser_config, classification_for,
+        discardable_obsolete_interception, media_block_expression, navigation_decision,
+        network_headers, pause_stage, request_command, response_plan, reveal_failure_is_stale,
+        settle_decision, settle_request_decision, should_reveal, supports_complete_frame_analysis,
+        target_action,
     };
     use crate::request_policy::RequestDecision;
 
@@ -1430,6 +1478,127 @@ mod tests {
             .build(Some(Url::parse("file:///etc/passwd").unwrap()))
             .unwrap_err();
         assert_eq!(error.to_string(), "start URL must use http or https");
+    }
+
+    #[test]
+    fn top_level_navigation_allows_only_complete_http_and_https_urls() {
+        for url in [
+            "http://example.test/",
+            "https://example.test/path?private=query#fragment",
+        ] {
+            assert_eq!(
+                navigation_decision(false, url),
+                NavigationDecision::ContinueMainFrame,
+                "{url}"
+            );
+        }
+
+        for url in [
+            "",
+            "not a url",
+            "about:blank",
+            "file:///etc/passwd",
+            "ftp://example.test/file",
+            "javascript:alert(1)",
+            "data:text/html,unsafe",
+            "blob:https://example.test/id",
+            "view-source:https://example.test/",
+            "devtools://devtools/bundled/inspector.html",
+            "chrome://settings/",
+            "chrome-untrusted://new-tab-page/",
+        ] {
+            assert_eq!(
+                navigation_decision(false, url),
+                NavigationDecision::DenyMainFrame,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn subframe_navigation_never_changes_main_frame_state() {
+        for url in [
+            "https://frame.example.test/",
+            "data:text/html,frame",
+            "malformed frame url",
+        ] {
+            assert_eq!(
+                navigation_decision(true, url),
+                NavigationDecision::IgnoreSubframe,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_transition_updates_only_an_allowed_main_frame() {
+        let mut state = ManualPageState::default();
+        state.navigation_started("original-loader");
+        state.load_completed("original-loader");
+        assert!(state.ready_to_reveal());
+
+        apply_navigation_decision(
+            NavigationDecision::IgnoreSubframe,
+            "subframe-loader",
+            &mut state,
+        )
+        .unwrap();
+        assert!(state.ready_to_reveal());
+
+        apply_navigation_decision(
+            NavigationDecision::ContinueMainFrame,
+            "next-loader",
+            &mut state,
+        )
+        .unwrap();
+        assert!(!state.ready_to_reveal());
+
+        let error = apply_navigation_decision(
+            NavigationDecision::DenyMainFrame,
+            "denied-loader",
+            &mut state,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "managed top-level navigation was denied");
+
+        let source = include_str!("managed.rs");
+        assert!(source.contains(
+            "apply_navigation_decision(\n                    navigation_decision(event.frame.parent_id.is_some(), &event.frame.url),"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_chromium_is_forced_onto_native_wayland() {
+        let fixture = ConfigFixture::new();
+        let argument_log = fixture.root.path().join("arguments");
+        fs::write(
+            &fixture.chromium,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+                argument_log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fixture.chromium, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = fixture.build(None).unwrap();
+        let mut child = build_managed_browser_config(&config)
+            .unwrap()
+            .launch()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("fake Chromium did not exit")
+            .unwrap();
+
+        let arguments = fs::read_to_string(argument_log).unwrap();
+        assert_eq!(
+            arguments
+                .lines()
+                .filter(|argument| argument.starts_with("--ozone-platform"))
+                .collect::<Vec<_>>(),
+            ["--ozone-platform=wayland"]
+        );
     }
 
     #[test]

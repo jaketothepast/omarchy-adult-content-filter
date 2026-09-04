@@ -98,10 +98,8 @@ fn main() -> Result<()> {
 }
 
 fn browse(start_url: Option<Url>, json: bool) -> Result<()> {
-    let profile = tempfile::Builder::new()
-        .prefix("omarchy-kids-browser-")
-        .tempdir()
-        .context("failed to create disposable Chromium profile")?;
+    let profile_root = std::env::var_os("OMARCHY_KIDS_PROFILE_ROOT").map(PathBuf::from);
+    let profile = create_managed_profile(profile_root.as_deref())?;
     let profile_path = profile.path().to_path_buf();
     let config = ManagedBrowserConfig::new(
         start_url,
@@ -127,6 +125,33 @@ fn browse(start_url: Option<Url>, json: bool) -> Result<()> {
         "disposable Chromium profile was not removed"
     );
     write_managed_output(&mut std::io::stdout().lock(), &summary, json)
+}
+
+fn create_managed_profile(root: Option<&Path>) -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("omarchy-kids-browser-");
+    match root {
+        Some(root) => {
+            anyhow::ensure!(root.is_absolute(), "managed profile root must be absolute");
+            let metadata = std::fs::symlink_metadata(root)
+                .context("failed to inspect managed profile root")?;
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "managed profile root must be a non-symlink directory"
+            );
+            anyhow::ensure!(
+                std::fs::canonicalize(root).context("failed to resolve managed profile root")?
+                    == root,
+                "managed profile root must be canonical"
+            );
+            builder
+                .tempdir_in(root)
+                .context("failed to create disposable Chromium profile")
+        }
+        None => builder
+            .tempdir()
+            .context("failed to create disposable Chromium profile"),
+    }
 }
 
 fn write_managed_output<W: Write>(
@@ -344,6 +369,28 @@ fn browse_cli_accepts_a_blank_start_or_one_web_url() {
 #[test]
 fn browse_cli_rejects_a_malformed_url() {
     assert!(Cli::try_parse_from(["filter", "browse", "--url", "not a URL"]).is_err());
+}
+
+#[test]
+fn managed_profile_is_created_only_inside_the_selected_private_root() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = create_managed_profile(Some(root.path())).unwrap();
+    assert_eq!(profile.path().parent(), Some(root.path()));
+    assert!(
+        profile
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("omarchy-kids-browser-")
+    );
+
+    let missing = root.path().join("missing");
+    assert!(create_managed_profile(Some(&missing)).is_err());
+
+    let redirected = root.path().join("redirected");
+    std::os::unix::fs::symlink(root.path(), &redirected).unwrap();
+    assert!(create_managed_profile(Some(&redirected)).is_err());
 }
 
 #[test]
