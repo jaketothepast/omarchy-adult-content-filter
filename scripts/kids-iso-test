@@ -27,10 +27,29 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$SCRIPT_DIR/resolve-workspace"
 
 reuse_base=false
-for argument in "$@"; do
-  if [[ $argument == "--reuse-base" ]]; then
-    reuse_base=true
-  fi
+forwarded_arguments=("$@")
+argument_index=0
+while ((argument_index < ${#forwarded_arguments[@]})); do
+  argument=${forwarded_arguments[argument_index]}
+  case $argument in
+    --reuse-base)
+      reuse_base=true
+      ;;
+    --encrypt | --provision | --install-only | --keep-running | --no-preview)
+      ;;
+    --sync-omarchy | --sync-all | --external-acceptance | --port | --memory | --timeout)
+      ((argument_index += 1))
+      if ((argument_index >= ${#forwarded_arguments[@]})); then
+        reuse_base=false
+        break
+      fi
+      ;;
+    -*)
+      reuse_base=false
+      break
+      ;;
+  esac
+  ((argument_index += 1))
 done
 
 base="$OMARCHY_ISO_PATH/test-runs/$(basename "$iso" .iso)/base.qcow2"

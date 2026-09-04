@@ -44,7 +44,7 @@ required_files=(
 )
 
 for path in "${required_files[@]}"; do
-  [[ -f $(installed_path "$path") ]] || fail "required installed path exists: $path"
+  [[ -f $(installed_path "$path") && ! -L $(installed_path "$path") ]] || fail "required installed path exists: $path"
 done
 
 assert_metadata() {
@@ -71,8 +71,8 @@ done
 extension_dir=$(installed_path /usr/share/omarchy-kids-browser-filter-demo/browser-extension)
 [[ -d $extension_dir ]] || fail "required installed path exists: /usr/share/omarchy-kids-browser-filter-demo/browser-extension"
 assert_metadata /usr/share/omarchy-kids-browser-filter-demo/browser-extension 755
-extension_files=$(find "$extension_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
-[[ $extension_files == $'cover.css\nmanifest.json' ]] || fail "browser extension contains exactly manifest.json and cover.css"
+extension_entries=$(find "$extension_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+[[ $extension_entries == $'cover.css\nmanifest.json' ]] || fail "browser extension contains exactly manifest.json and cover.css"
 
 runtime_link=$(installed_path /usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1)
 [[ -L $runtime_link ]] || fail "required installed path exists: /usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1"
@@ -138,7 +138,7 @@ jq -e '
   .clean_shutdown == true and
   .onnx_runtime_version == "1.27.1" and
   .model_sha256 == "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f" and
-  .reveal_latency_millis <= 500 and
+  (.reveal_latency_millis | type == "number" and . >= 0 and . <= 500) and
   .no_flash_assertion.requested_hold_millis == 1500 and
   .no_flash_assertion.hold_screenshot_count >= 1 and
   .no_flash_assertion.hold_sampled_pixels > 0 and

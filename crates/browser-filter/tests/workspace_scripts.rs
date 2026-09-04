@@ -1075,6 +1075,71 @@ fn kids_iso_test_refuses_an_existing_base_without_explicit_reuse() {
     assert_eq!(fs::read_to_string(base).unwrap(), "preserved base");
 }
 
+// Production mutation caught: token-scanning all forwarded arguments mistakes a value-position
+// `--reuse-base` for the real zero-arity flag and can expose preserved installation evidence to a
+// fresh install.
+#[test]
+fn kids_iso_test_does_not_treat_an_option_value_as_explicit_base_reuse() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    let iso = fixture.path().join("kids-demo.iso");
+    write_file(&iso, "fixture");
+    let package_source = fixture.path().join("package source");
+    fs::create_dir(&package_source).unwrap();
+    let base = workspace.iso.join("test-runs/kids-demo/base.qcow2");
+    write_file(&base, "preserved base");
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-test"),
+        "printf 'delegated\\n'\nprintf 'overwritten base' >\"$BASE_TO_MUTATE\"\n",
+    );
+
+    for value_option in [
+        "--sync-omarchy",
+        "--sync-all",
+        "--external-acceptance",
+        "--port",
+        "--memory",
+        "--timeout",
+    ] {
+        write_file(&base, "preserved base");
+        let output = run_wrapper(
+            "kids-iso-test",
+            &workspace,
+            &[
+                iso.to_str().unwrap(),
+                value_option,
+                "--reuse-base",
+                "--no-preview",
+            ],
+            &[
+                ("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path()),
+                ("BASE_TO_MUTATE", base.as_path()),
+            ],
+        );
+
+        assert!(
+            !output.status.success(),
+            "{value_option} value was treated as real reuse"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "ISO harness was delegated to for {value_option}"
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "ERROR kids-iso-test: reusable base already exists: {}\nUse --reuse-base to use it, or build a uniquely tagged ISO.\n",
+                base.display()
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(&base).unwrap(),
+            "preserved base",
+            "{value_option} decoy exposed the base to mutation"
+        );
+    }
+}
+
 // Production mutation caught: refusing an explicitly selected reusable base breaks the intended
 // second-phase acceptance run; deleting it would destroy preserved installation evidence.
 #[test]
@@ -1115,6 +1180,64 @@ fn kids_iso_test_preserves_and_delegates_an_explicitly_reused_base() {
         ]
     );
     assert_eq!(fs::read_to_string(base).unwrap(), "preserved base");
+}
+
+// Production mutation caught: omitting an ordinary one-value consumer option from the arity table
+// makes its real value look like unknown syntax and can refuse a later explicit `--reuse-base`.
+#[test]
+fn kids_iso_test_recognizes_reuse_after_each_non_external_value_option() {
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = WorkspacePaths::create_at(fixture.path());
+    write_bash_executable(
+        &workspace.iso.join("bin/omarchy-iso-test"),
+        "printf 'ARG=%s\\n' \"$@\"\n",
+    );
+    let iso = fixture.path().join("kids-demo.iso");
+    write_file(&iso, "fixture");
+    let package_source = fixture.path().join("package source");
+    fs::create_dir(&package_source).unwrap();
+    let base = workspace.iso.join("test-runs/kids-demo/base.qcow2");
+
+    for (value_option, value) in [
+        ("--sync-omarchy", "sync source"),
+        ("--sync-all", "complete source"),
+        ("--port", "2223"),
+        ("--memory", "4096"),
+        ("--timeout", "1200"),
+    ] {
+        write_file(&base, "preserved base");
+        let output = run_wrapper(
+            "kids-iso-test",
+            &workspace,
+            &[
+                iso.to_str().unwrap(),
+                value_option,
+                value,
+                "--reuse-base",
+                "--no-preview",
+            ],
+            &[("OMARCHY_KIDS_PACKAGE_SOURCE", package_source.as_path())],
+        );
+
+        assert!(
+            output.status.success(),
+            "{value_option} hid real reuse: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            stdout_lines(&output),
+            [
+                &format!("ARG={}", iso.display()),
+                "ARG=--external-acceptance",
+                &format!("ARG={}", package_source.display()),
+                &format!("ARG={value_option}"),
+                &format!("ARG={value}"),
+                "ARG=--reuse-base",
+                "ARG=--no-preview",
+            ]
+        );
+        assert_eq!(fs::read_to_string(&base).unwrap(), "preserved base");
+    }
 }
 
 // Production mutation caught: omitting one package-owned asset lets a partially installed demo
@@ -1181,6 +1304,64 @@ fn guest_acceptance_rejects_a_required_path_owned_by_another_package() {
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
         "not ok - required path is owned by omarchy-kids-browser-filter-demo: /usr/bin/omarchy-kids-browser-filter-demo\n"
+    );
+}
+
+// Production mutation caught: enumerating only regular files hides an unexpected symlink in the
+// package-owned extension directory and no longer proves that it has exactly two direct children.
+#[test]
+fn guest_acceptance_rejects_an_unexpected_extension_symlink() {
+    let fixture = GuestAcceptanceFixture::new();
+    let extension = GuestAcceptanceFixture::rooted(
+        &fixture.install_root,
+        "/usr/share/omarchy-kids-browser-filter-demo/browser-extension",
+    );
+    std::os::unix::fs::symlink("cover.css", extension.join("unexpected-link")).unwrap();
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser extension contains exactly manifest.json and cover.css\n"
+    );
+}
+
+// Production mutation caught: enumerating only regular files hides an unexpected subdirectory in
+// the package-owned extension directory and no longer proves the direct-child boundary.
+#[test]
+fn guest_acceptance_rejects_an_unexpected_extension_directory() {
+    let fixture = GuestAcceptanceFixture::new();
+    let extension = GuestAcceptanceFixture::rooted(
+        &fixture.install_root,
+        "/usr/share/omarchy-kids-browser-filter-demo/browser-extension",
+    );
+    fs::create_dir(extension.join("unexpected-directory")).unwrap();
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser extension contains exactly manifest.json and cover.css\n"
+    );
+}
+
+// Production mutation caught: `-f` follows symlinks, so checking names and metadata through a fake
+// package database can accept an exact-name link in place of a package-owned regular extension file.
+#[test]
+fn guest_acceptance_requires_the_named_extension_entries_to_be_regular_files() {
+    let manifest = "/usr/share/omarchy-kids-browser-filter-demo/browser-extension/manifest.json";
+    let fixture = GuestAcceptanceFixture::with_missing_path(Some(manifest));
+    let manifest_path = GuestAcceptanceFixture::rooted(&fixture.install_root, manifest);
+    std::os::unix::fs::symlink("cover.css", manifest_path).unwrap();
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!("not ok - required installed path exists: {manifest}\n")
     );
 }
 
@@ -1264,6 +1445,94 @@ fn guest_acceptance_rejects_an_incorrect_summary_contract() {
     write_file(
         &fixture.summary,
         &valid_guest_summary().replacen("\"intercepted\":17", "\"intercepted\":16", 1),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: jq orders a missing field as null, so an upper-bound-only predicate
+// accepts a summary that never reports reveal latency.
+#[test]
+fn guest_acceptance_rejects_a_missing_reveal_latency() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen("\"reveal_latency_millis\":500,", "", 1),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: jq considers null lower than numbers, so null satisfies only a
+// maximum comparison without proving a measured numeric latency.
+#[test]
+fn guest_acceptance_rejects_a_null_reveal_latency() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen(
+            "\"reveal_latency_millis\":500",
+            "\"reveal_latency_millis\":null",
+            1,
+        ),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: a numeric-looking JSON string is not a measured numeric latency and
+// must not gain acceptance through later predicate rewrites or coercion.
+#[test]
+fn guest_acceptance_rejects_a_string_reveal_latency() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen(
+            "\"reveal_latency_millis\":500",
+            "\"reveal_latency_millis\":\"500\"",
+            1,
+        ),
+    );
+
+    let output = fixture.run(&[]);
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "not ok - browser summary proves the controlled fixture contract\n"
+    );
+}
+
+// Production mutation caught: a negative number satisfies an upper bound but cannot be a real
+// elapsed reveal latency.
+#[test]
+fn guest_acceptance_rejects_a_negative_reveal_latency() {
+    let fixture = GuestAcceptanceFixture::new();
+    write_file(
+        &fixture.summary,
+        &valid_guest_summary().replacen(
+            "\"reveal_latency_millis\":500",
+            "\"reveal_latency_millis\":-1",
+            1,
+        ),
     );
 
     let output = fixture.run(&[]);
