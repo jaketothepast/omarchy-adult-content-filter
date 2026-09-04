@@ -8,3 +8,4 @@ pub mod inference;
 pub mod managed;
 pub mod metrics;
 pub mod policy;
+pub mod request_policy;
