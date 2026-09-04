@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Managed Browser Filter — Controlled Demo
+Exec=omarchy-kids-browser-filter-demo --images 17 --flagged-index 5 --hold-millis 500 --assert-no-flash
+Terminal=false

@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, oneshot};
 use url::{Host, Url};
 
 use crate::{
-    inference::{DEFAULT_MAX_ENCODED_BYTES, Detector, InferenceReport},
+    inference::{DEFAULT_MAX_ENCODED_BYTES, Detector, DetectorMetadata, InferenceReport},
     metrics::{MetricRecord, MetricSink, MetricStage, MetricVerdict},
     policy::{Policy, Verdict},
 };
@@ -145,6 +145,8 @@ pub struct DomImageMetadata {
 #[derive(Debug, Serialize)]
 pub struct ExperimentSummary {
     pub chromium_version: String,
+    pub onnx_runtime_version: String,
+    pub model_sha256: String,
     pub intercepted: usize,
     pub continued: usize,
     pub replaced: usize,
@@ -275,6 +277,7 @@ async fn run_experiment<W: std::io::Write>(
         policy,
         mut metrics,
     } = experiment;
+    let detector_metadata = detector.metadata().clone();
     let browser_config = BrowserConfig::builder()
         .chrome_executable(&config.chromium_bin)
         .with_head()
@@ -300,6 +303,7 @@ async fn run_experiment<W: std::io::Write>(
                 &policy,
                 &mut metric_buffer,
                 &config,
+                &detector_metadata,
             )
             .await
         }
@@ -334,6 +338,7 @@ async fn run_with_browser(
     policy: &Policy,
     metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
+    detector_metadata: &DetectorMetadata,
 ) -> Result<ExperimentSummary> {
     let handler_task = tokio::spawn(async move {
         while let Some(event) = handler.next().await {
@@ -350,6 +355,7 @@ async fn run_with_browser(
             policy,
             metrics,
             config,
+            detector_metadata,
             Arc::clone(&ledger),
         ),
     )
@@ -548,6 +554,30 @@ struct RunCounts {
     replaced: usize,
 }
 
+fn experiment_summary(
+    chromium_version: String,
+    detector_metadata: &DetectorMetadata,
+    counts: RunCounts,
+    unresolved: usize,
+    reveal_latency_millis: u64,
+    no_flash_assertion: Option<NoFlashAssertionSummary>,
+    dom_images: Vec<DomImageMetadata>,
+) -> ExperimentSummary {
+    ExperimentSummary {
+        chromium_version,
+        onnx_runtime_version: detector_metadata.runtime_version.clone(),
+        model_sha256: detector_metadata.model_sha256.clone(),
+        intercepted: counts.intercepted,
+        continued: counts.continued,
+        replaced: counts.replaced,
+        unresolved,
+        clean_shutdown: false,
+        reveal_latency_millis,
+        no_flash_assertion,
+        dom_images,
+    }
+}
+
 struct NoFlashCapture {
     requested_hold: Duration,
     actual_hold: Duration,
@@ -740,6 +770,7 @@ async fn run_page(
     policy: &Policy,
     metrics: &mut MetricBuffer,
     config: &ExperimentConfig,
+    detector_metadata: &DetectorMetadata,
     ledger: Arc<Mutex<PauseLedger>>,
 ) -> Result<ExperimentSummary> {
     let page = tokio::time::timeout(config.acquisition_timeout, browser.new_page("about:blank"))
@@ -875,20 +906,18 @@ async fn run_page(
     assert_dom_image_colors(&dom_images, expected_flagged_index)?;
     let no_flash_assertion = no_flash.map(NoFlashCapture::into_summary).transpose()?;
 
-    Ok(ExperimentSummary {
+    Ok(experiment_summary(
         chromium_version,
-        intercepted: counts.intercepted,
-        continued: counts.continued,
-        replaced: counts.replaced,
-        unresolved: ledger
+        detector_metadata,
+        counts,
+        ledger
             .lock()
             .expect("pause ledger mutex poisoned")
             .unresolved_count(),
-        clean_shutdown: false,
         reveal_latency_millis,
         no_flash_assertion,
         dom_images,
-    })
+    ))
 }
 
 struct PreparedDecision {
@@ -1334,7 +1363,7 @@ mod tests {
     use std::{
         fs,
         io::Write,
-        path::Path,
+        path::{Path, PathBuf},
         time::{Duration, Instant},
     };
 
@@ -1351,11 +1380,38 @@ mod tests {
         CleanupOperations, DomImageMetadata, ExperimentConfig, MAX_OPERATION_TIMEOUT, MetricBuffer,
         PauseLedger, RunCounts, ValidatedRevealLatency, assert_cover_screenshot,
         assert_dom_image_colors, assert_reveal_screenshot, continue_response, decode_response_body,
-        fetch_enable_params, finish_response_after_cdp, finish_reveal_after_response,
-        flush_metrics, perform_cleanup, replacement_headers, replacement_response,
-        resolve_and_buffer_metrics, response_requires_body,
+        experiment_summary, fetch_enable_params, finish_response_after_cdp,
+        finish_reveal_after_response, flush_metrics, perform_cleanup, replacement_headers,
+        replacement_response, resolve_and_buffer_metrics, response_requires_body,
     };
+    use crate::inference::DetectorMetadata;
     use crate::metrics::{MetricRecord, MetricSink, MetricStage, MetricVerdict};
+
+    // Production mutation caught: deriving runtime identity from a versioned library filename
+    // would misreport the detector session when the loaded runtime API reports a different value.
+    #[test]
+    fn headed_summary_uses_detector_reported_identity() {
+        let metadata = DetectorMetadata {
+            model_sha256: "detector-model-sha256".to_owned(),
+            runtime_path: PathBuf::from("/runtime/libonnxruntime.so.99.0.0"),
+            runtime_version: "1.27.1".to_owned(),
+        };
+
+        let summary = experiment_summary(
+            "Chromium 140".to_owned(),
+            &metadata,
+            RunCounts::default(),
+            0,
+            125,
+            None,
+            Vec::new(),
+        );
+        let value = serde_json::to_value(summary).unwrap();
+
+        assert_eq!(value["onnx_runtime_version"], "1.27.1");
+        assert_eq!(value["model_sha256"], "detector-model-sha256");
+        assert!(value.get("runtime_path").is_none());
+    }
 
     // Production mutation caught: adding permissions, executable resources, undeclared files, or
     // remote CSS loads would widen this permissionless declarative cover into executable behavior.

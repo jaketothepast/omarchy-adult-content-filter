@@ -1,0 +1,10 @@
+#!/bin/bash
+
+set -euo pipefail
+
+export CHROMIUM_BIN=/usr/bin/chromium
+export ORT_DYLIB_PATH=/usr/lib/omarchy-kids-browser-filter-demo/onnxruntime/libonnxruntime.so.1.27.1
+export NUDENET_MODEL_PATH=/usr/share/omarchy-kids-browser-filter-demo/models/320n.onnx
+export OMARCHY_KIDS_EXTENSION_DIR=/usr/share/omarchy-kids-browser-filter-demo/browser-extension
+
+exec /usr/lib/omarchy-kids-browser-filter-demo/omarchy-kids-browser-filter run "$@"
