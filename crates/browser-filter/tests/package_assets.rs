@@ -160,6 +160,63 @@ fn desktop_entry_runs_only_the_controlled_fixture() {
     assert!(entry.get("MimeType").is_none());
 }
 
+#[test]
+fn adult_content_filter_wrapper_uses_only_private_runtime_and_packaged_inputs() {
+    let wrapper = workspace_path("packaging/arch/omarchy-adult-content-filter");
+    let syntax = Command::new("bash")
+        .arg("-n")
+        .arg(&wrapper)
+        .output()
+        .expect("failed to run bash syntax parser");
+    assert!(
+        syntax.status.success(),
+        "wrapper syntax failed: {}",
+        String::from_utf8_lossy(&syntax.stderr)
+    );
+
+    let contents = fs::read_to_string(&wrapper).expect("managed-browser wrapper is missing");
+    for required in [
+        "set -euo pipefail",
+        "readonly PATH=/usr/bin",
+        "umask 077",
+        "[[ $# -eq 0 ]]",
+        "(( EUID != 0 ))",
+        "readonly runtime_root=\"${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/omarchy-adult-content-filter\"",
+        "/usr/bin/install -d -m 0700 -- \"$runtime_root\"",
+        "export OMARCHY_KIDS_PROFILE_ROOT=\"$runtime_root\"",
+        "export CHROMIUM_BIN=/usr/bin/chromium",
+        "export ORT_DYLIB_PATH=/usr/lib/omarchy-adult-content-filter/onnxruntime/libonnxruntime.so.1",
+        "export NUDENET_MODEL_PATH=/usr/share/omarchy-adult-content-filter/models/320n.onnx",
+        "export OMARCHY_KIDS_EXTENSION_DIR=/usr/share/omarchy-adult-content-filter/browser-extension",
+        "export OMARCHY_KIDS_BLOCKLIST_PATH=/usr/share/omarchy-adult-content-filter/policies/adult-domains.hosts",
+        "exec /usr/lib/omarchy-adult-content-filter/omarchy-adult-content-filter browse --json",
+    ] {
+        assert!(contents.contains(required), "missing {required:?}");
+    }
+    for forbidden in ["sudo", "systemctl", "/etc/chromium", "\"$@\""] {
+        assert!(!contents.contains(forbidden), "unexpected {forbidden:?}");
+    }
+}
+
+#[test]
+fn adult_content_filter_desktop_entry_is_opt_in_and_not_a_default_handler() {
+    let desktop = fs::read_to_string(workspace_path(
+        "packaging/arch/omarchy-adult-content-filter.desktop",
+    ))
+    .expect("managed-browser desktop asset is missing");
+    let sections = parse_desktop_entry(&desktop);
+
+    assert_eq!(sections.keys().collect::<Vec<_>>(), ["Desktop Entry"]);
+    let entry = &sections["Desktop Entry"];
+    assert_eq!(entry["Type"], "Application");
+    assert_eq!(entry["Name"], "Omarchy Adult Content Filter");
+    assert_eq!(entry["Exec"], "omarchy-adult-content-filter");
+    assert_eq!(entry["Terminal"], "false");
+    assert_eq!(entry["Categories"], "Network;WebBrowser;");
+    assert!(entry.get("MimeType").is_none());
+    assert!(entry.get("X-GNOME-Autostart-enabled").is_none());
+}
+
 // Production mutation caught: omitting either pinned identity or relaxing the unresolved license
 // warning could allow the private evaluation package or ISO to be treated as redistributable.
 #[test]
@@ -176,4 +233,17 @@ fn notices_pin_runtime_and_model_and_forbid_redistribution() {
     assert!(notices.contains(
         "The ONNX Runtime license does not declare the Rust project or model weights to be MIT- or AGPL-licensed."
     ));
+}
+
+#[test]
+fn notices_pin_the_adult_domain_policy_and_its_license() {
+    let notices = fs::read_to_string(workspace_path("packaging/NOTICES.md"))
+        .expect("private-evaluation notice is missing");
+
+    assert!(notices.contains("2bb49d741a2c9b922b0ed59be6c28ce543bed81b"));
+    assert!(notices.contains("a512c2815fe612fa4eee8c7b1e2dab17f7a39016489eab3e3bbcc407edb4f514"));
+    assert!(notices.contains("8e52717212b5051232dd31fb2247310bd91d5295eaab380dbea6454d0268443b"));
+    assert!(
+        notices.contains("The StevenBlack hosts repository is distributed under the MIT License.")
+    );
 }

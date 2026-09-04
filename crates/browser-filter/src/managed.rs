@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use chromiumoxide::{
     Browser, BrowserConfig, Page,
     cdp::browser_protocol::{
+        browser::{SetDownloadBehaviorBehavior, SetDownloadBehaviorParams},
         fetch::{
             ContinueRequestParams, EventRequestPaused, FailRequestParams, GetResponseBodyParams,
             HeaderEntry, RequestId,
@@ -42,6 +43,10 @@ const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn managed_chromium_argument() -> (&'static str, &'static str) {
     ("ozone-platform", "wayland")
+}
+
+fn managed_download_behavior() -> SetDownloadBehaviorParams {
+    SetDownloadBehaviorParams::new(SetDownloadBehaviorBehavior::Deny)
 }
 
 #[derive(Debug)]
@@ -644,6 +649,7 @@ fn build_managed_browser_config(config: &ManagedBrowserConfig) -> Result<Browser
     BrowserConfig::builder()
         .chrome_executable(&config.chromium_bin)
         .with_head()
+        .arg("disable-dev-tools")
         .arg(managed_chromium_argument())
         .user_data_dir(&config.profile_dir)
         .extension(config.extension_dir.display().to_string())
@@ -773,6 +779,14 @@ async fn managed_event_loop(
     request_policy: &RequestPolicy,
     config: &ManagedBrowserConfig,
 ) -> Result<ManagedBrowserSummary> {
+    within(
+        config.acquisition_timeout,
+        browser.execute(managed_download_behavior()),
+        "download policy deadline elapsed",
+    )
+    .await?
+    .context("failed to deny managed-browser downloads")?;
+
     let page = within(
         config.lifecycle_timeout,
         browser.new_page("about:blank"),
@@ -1415,10 +1429,10 @@ mod tests {
         ManualCounts, ManualPageState, ManualPauseLedger, NavigationDecision, PauseStage,
         RequestLayerOutcome, RequestLoaderLedger, ResponsePlan, TargetAction,
         apply_navigation_decision, build_managed_browser_config, classification_for,
-        discardable_obsolete_interception, media_block_expression, navigation_decision,
-        network_headers, pause_stage, request_command, response_plan, reveal_failure_is_stale,
-        settle_decision, settle_request_decision, should_reveal, supports_complete_frame_analysis,
-        target_action,
+        discardable_obsolete_interception, managed_download_behavior, media_block_expression,
+        navigation_decision, network_headers, pause_stage, request_command, response_plan,
+        reveal_failure_is_stale, settle_decision, settle_request_decision, should_reveal,
+        supports_complete_frame_analysis, target_action,
     };
     use crate::request_policy::RequestDecision;
 
@@ -1592,13 +1606,28 @@ mod tests {
             .unwrap();
 
         let arguments = fs::read_to_string(argument_log).unwrap();
+        let mut safety_arguments = arguments
+            .lines()
+            .filter(|argument| {
+                *argument == "--disable-dev-tools" || argument.starts_with("--ozone-platform")
+            })
+            .collect::<Vec<_>>();
+        safety_arguments.sort_unstable();
         assert_eq!(
-            arguments
-                .lines()
-                .filter(|argument| argument.starts_with("--ozone-platform"))
-                .collect::<Vec<_>>(),
-            ["--ozone-platform=wayland"]
+            safety_arguments,
+            ["--disable-dev-tools", "--ozone-platform=wayland"]
         );
+    }
+
+    #[test]
+    fn managed_browser_denies_downloads_before_navigation() {
+        assert_eq!(
+            serde_json::to_value(managed_download_behavior()).unwrap(),
+            serde_json::json!({"behavior": "deny"})
+        );
+        let source = include_str!("managed.rs");
+        let production_call = ["browser.execute(", "managed_download_behavior()", ")"].concat();
+        assert_eq!(source.matches(&production_call).count(), 1);
     }
 
     #[test]

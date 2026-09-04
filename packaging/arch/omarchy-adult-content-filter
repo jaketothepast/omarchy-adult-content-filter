@@ -1,0 +1,53 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly PATH=/usr/bin
+export PATH
+umask 077
+
+[[ $# -eq 0 ]] || {
+  printf 'omarchy-adult-content-filter accepts no arguments\n' >&2
+  exit 64
+}
+(( EUID != 0 )) || {
+  printf 'omarchy-adult-content-filter must not run as root\n' >&2
+  exit 77
+}
+
+readonly runtime_root="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/omarchy-adult-content-filter"
+[[ $XDG_RUNTIME_DIR == /* && -d $XDG_RUNTIME_DIR && ! -L $XDG_RUNTIME_DIR ]] || {
+  printf 'XDG_RUNTIME_DIR is not a safe directory\n' >&2
+  exit 78
+}
+[[ $(/usr/bin/readlink -f -- "$XDG_RUNTIME_DIR") == "$XDG_RUNTIME_DIR" ]] || {
+  printf 'XDG_RUNTIME_DIR is not canonical\n' >&2
+  exit 78
+}
+runtime_metadata=$(/usr/bin/stat -c '%u %a' -- "$XDG_RUNTIME_DIR")
+[[ $runtime_metadata == "$EUID 700" ]] || {
+  printf 'XDG_RUNTIME_DIR has unsafe ownership or mode\n' >&2
+  exit 78
+}
+
+/usr/bin/install -d -m 0700 -- "$runtime_root"
+[[ -d $runtime_root && ! -L $runtime_root ]] || {
+  printf 'managed browser runtime directory is unsafe\n' >&2
+  exit 78
+}
+runtime_metadata=$(/usr/bin/stat -c '%u %a' -- "$runtime_root")
+[[ $runtime_metadata == "$EUID 700" ]] || {
+  printf 'managed browser runtime directory has unsafe ownership or mode\n' >&2
+  exit 78
+}
+
+export HOME="$runtime_root"
+export TMPDIR="$runtime_root"
+export OMARCHY_KIDS_PROFILE_ROOT="$runtime_root"
+export CHROMIUM_BIN=/usr/bin/chromium
+export ORT_DYLIB_PATH=/usr/lib/omarchy-adult-content-filter/onnxruntime/libonnxruntime.so.1
+export NUDENET_MODEL_PATH=/usr/share/omarchy-adult-content-filter/models/320n.onnx
+export OMARCHY_KIDS_EXTENSION_DIR=/usr/share/omarchy-adult-content-filter/browser-extension
+export OMARCHY_KIDS_BLOCKLIST_PATH=/usr/share/omarchy-adult-content-filter/policies/adult-domains.hosts
+
+exec /usr/lib/omarchy-adult-content-filter/omarchy-adult-content-filter browse --json

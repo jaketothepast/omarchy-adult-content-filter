@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Omarchy Adult Content Filter
+Comment=Browse with known-domain blocking and local image filtering
+Exec=omarchy-adult-content-filter
+Terminal=false
+Categories=Network;WebBrowser;
+Keywords=Adult;Content;Filter;Browser;
+StartupNotify=true
