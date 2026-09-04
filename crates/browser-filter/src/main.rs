@@ -134,11 +134,12 @@ fn write_managed_output<W: Write>(
     } else {
         writeln!(
             writer,
-            "{} intercepted, {} continued, {} replaced ({} fail-closed), {} extra pages blocked",
+            "{} intercepted, {} continued, {} replaced ({} fail-closed), {} canceled by navigation, {} extra pages blocked",
             summary.intercepted,
             summary.continued,
             summary.replaced,
             summary.failed_closed,
+            summary.canceled,
             summary.blocked_extra_pages,
         )?;
     }

@@ -1,16 +1,23 @@
-use std::{collections::HashSet, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chromiumoxide::{
     Browser, BrowserConfig, Page,
     cdp::browser_protocol::{
         fetch::{EventRequestPaused, GetResponseBodyParams, RequestId},
+        network::{EventRequestWillBeSent, LoaderId, RequestId as NetworkRequestId},
         page::{
             EventFrameNavigated, EventLifecycleEvent, GetFrameTreeParams, NavigateParams,
             SetLifecycleEventsEnabledParams,
         },
         target::{CloseTargetParams, EventTargetCreated, EventTargetDestroyed, TargetId},
     },
+    listeners::EventStream,
 };
 use futures::StreamExt;
 use serde::Serialize;
@@ -161,12 +168,69 @@ fn reveal_failure_is_stale(active_loader: Option<&str>, before: &str, after: &st
     before != after || active_loader != Some(after)
 }
 
+fn invalid_interception_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<chromiumoxide::error::CdpError>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                chromiumoxide::error::CdpError::Chrome(response)
+                    if response.code == -32602 && response.message == "Invalid InterceptionId."
+            )
+        })
+}
+
+fn discardable_obsolete_interception(
+    error: &anyhow::Error,
+    request_loader: Option<&str>,
+    current_loader: &str,
+) -> bool {
+    invalid_interception_error(error)
+        && request_loader.is_some()
+        && request_loader != Some(current_loader)
+}
+
+const MAX_REQUEST_LOADER_RECORDS: usize = 1024;
+
+#[derive(Default)]
+struct RequestLoaderLedger {
+    order: VecDeque<NetworkRequestId>,
+    loaders: HashMap<NetworkRequestId, LoaderId>,
+}
+
+impl RequestLoaderLedger {
+    fn record(&mut self, request_id: NetworkRequestId, loader_id: LoaderId) {
+        if self.loaders.insert(request_id.clone(), loader_id).is_some() {
+            return;
+        }
+        self.order.push_back(request_id);
+        if self.order.len() > MAX_REQUEST_LOADER_RECORDS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.loaders.remove(&oldest);
+        }
+    }
+
+    fn take(&mut self, request_id: &NetworkRequestId) -> Option<LoaderId> {
+        let loader = self.loaders.remove(request_id)?;
+        if let Some(index) = self
+            .order
+            .iter()
+            .position(|candidate| candidate == request_id)
+        {
+            self.order.remove(index);
+        }
+        Some(loader)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ManualCounts {
     intercepted: usize,
     continued: usize,
     replaced: usize,
     failed_closed: usize,
+    canceled: usize,
 }
 
 #[derive(Default)]
@@ -228,6 +292,7 @@ struct ManualPageState {
     active_loader: Option<String>,
     loaded_loader: Option<String>,
     ledger: ManualPauseLedger,
+    request_loaders: RequestLoaderLedger,
     counts: ManualCounts,
 }
 
@@ -239,6 +304,13 @@ impl ManualPageState {
 
     fn begin_response(&mut self, request_id: &RequestId) -> Result<()> {
         self.ledger.begin(request_id)
+    }
+
+    fn cancel_obsolete(&mut self, request_id: &RequestId) -> Result<()> {
+        self.ledger.resolved(request_id)?;
+        self.counts.intercepted += 1;
+        self.counts.canceled += 1;
+        Ok(())
     }
 
     fn load_completed(&mut self, loader_id: &str) -> bool {
@@ -265,6 +337,7 @@ pub struct ManagedBrowserSummary {
     pub continued: usize,
     pub replaced: usize,
     pub failed_closed: usize,
+    pub canceled: usize,
     pub blocked_extra_pages: usize,
     pub unresolved: usize,
     pub clean_shutdown: bool,
@@ -425,6 +498,13 @@ async fn managed_event_loop(
     )
     .await?
     .context("failed to register Fetch.requestPaused listener")?;
+    let mut requests = within(
+        config.acquisition_timeout,
+        page.event_listener::<EventRequestWillBeSent>(),
+        "Network.requestWillBeSent listener registration deadline elapsed",
+    )
+    .await?
+    .context("failed to register Network.requestWillBeSent listener")?;
     let mut frames = within(
         config.acquisition_timeout,
         page.event_listener::<EventFrameNavigated>(),
@@ -507,8 +587,20 @@ async fn managed_event_loop(
             }
             event = pauses.next() => {
                 let Some(event) = event else { break; };
-                process_managed_pause(&page, event.as_ref(), detector_session, policy, config, &mut state).await?;
+                process_managed_pause(
+                    &page,
+                    event.as_ref(),
+                    detector_session,
+                    policy,
+                    config,
+                    &mut state,
+                    &mut requests,
+                ).await?;
                 reveal_if_current_and_ready(&page, config, &state).await?;
+            }
+            event = requests.next() => {
+                let Some(event) = event else { break; };
+                state.request_loaders.record(event.request_id.clone(), event.loader_id.clone());
             }
             event = frames.next() => {
                 let Some(event) = event else { break; };
@@ -563,6 +655,7 @@ async fn managed_event_loop(
         continued: state.counts.continued,
         replaced: state.counts.replaced,
         failed_closed: state.counts.failed_closed,
+        canceled: state.counts.canceled,
         blocked_extra_pages,
         unresolved: state.ledger.unresolved_count(),
         clean_shutdown: false,
@@ -695,27 +788,63 @@ async fn process_managed_pause(
     policy: &Policy,
     config: &ManagedBrowserConfig,
     state: &mut ManualPageState,
+    requests: &mut EventStream<EventRequestWillBeSent>,
 ) -> Result<()> {
     state.begin_response(&event.request_id)?;
     let classification =
         prepare_managed_classification(page, event, detector_session, policy, config).await;
     let replace = classification != Classification::Allow;
-    if replace {
-        within(
+    let resolution = if replace {
+        match within(
             config.acquisition_timeout,
             page.execute(replacement_response(event.request_id.clone())),
             "Fetch.fulfillRequest deadline elapsed",
         )
-        .await?
-        .context("failed to fulfill a managed image response")?;
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(anyhow::Error::from(error)),
+            Err(error) => Err(error),
+        }
     } else {
-        within(
+        match within(
             config.acquisition_timeout,
             page.execute(continue_response(event.request_id.clone())),
             "Fetch.continueResponse deadline elapsed",
         )
-        .await?
-        .context("failed to continue a managed image response")?;
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(anyhow::Error::from(error)),
+            Err(error) => Err(error),
+        }
+    };
+    if let Err(error) = resolution {
+        if invalid_interception_error(&error) {
+            let request_loader = request_loader_for(
+                event.network_id.as_ref(),
+                requests,
+                &mut state.request_loaders,
+                config.acquisition_timeout,
+            )
+            .await;
+            if let Ok((_, current_loader)) =
+                current_main_frame(page, config.acquisition_timeout).await
+                && discardable_obsolete_interception(
+                    &error,
+                    request_loader.as_ref().map(LoaderId::as_ref),
+                    current_loader.as_ref(),
+                )
+            {
+                state.cancel_obsolete(&event.request_id)?;
+                return Ok(());
+            }
+        }
+        return Err(error).context(if replace {
+            "failed to fulfill a managed image response"
+        } else {
+            "failed to continue a managed image response"
+        });
     }
     state.ledger.resolved(&event.request_id)?;
     state.counts.intercepted += 1;
@@ -728,6 +857,30 @@ async fn process_managed_pause(
         state.counts.failed_closed += 1;
     }
     Ok(())
+}
+
+async fn request_loader_for(
+    request_id: Option<&NetworkRequestId>,
+    requests: &mut EventStream<EventRequestWillBeSent>,
+    request_loaders: &mut RequestLoaderLedger,
+    deadline: Duration,
+) -> Option<LoaderId> {
+    let request_id = request_id?;
+    if let Some(loader) = request_loaders.take(request_id) {
+        return Some(loader);
+    }
+    tokio::time::timeout(deadline, async {
+        loop {
+            let event = requests.next().await?;
+            request_loaders.record(event.request_id.clone(), event.loader_id.clone());
+            if let Some(loader) = request_loaders.take(request_id) {
+                return Some(loader);
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn prepare_managed_classification(
@@ -779,7 +932,10 @@ async fn prepare_managed_classification(
 mod tests {
     use std::{fs, path::PathBuf, time::Duration};
 
-    use chromiumoxide::cdp::browser_protocol::fetch::RequestId;
+    use chromiumoxide::cdp::browser_protocol::{
+        fetch::RequestId,
+        network::{LoaderId, RequestId as NetworkRequestId},
+    };
     use tempfile::TempDir;
     use url::Url;
 
@@ -790,9 +946,9 @@ mod tests {
 
     use super::{
         Classification, ManagedBrowserConfig, ManagedBrowserSummary, ManualCounts, ManualPageState,
-        ManualPauseLedger, ResponsePlan, TargetAction, classification_for, response_plan,
-        reveal_failure_is_stale, settle_decision, should_reveal, supports_complete_frame_analysis,
-        target_action,
+        ManualPauseLedger, RequestLoaderLedger, ResponsePlan, TargetAction, classification_for,
+        discardable_obsolete_interception, response_plan, reveal_failure_is_stale, settle_decision,
+        should_reveal, supports_complete_frame_analysis, target_action,
     };
 
     struct ConfigFixture {
@@ -1071,6 +1227,71 @@ mod tests {
     }
 
     #[test]
+    fn invalid_interception_is_discarded_only_for_an_obsolete_request_loader() {
+        let invalid = anyhow::Error::new(chromiumoxide::error::CdpError::Chrome(
+            chromiumoxide::types::Error {
+                code: -32602,
+                message: "Invalid InterceptionId.".to_owned(),
+            },
+        ));
+        assert!(discardable_obsolete_interception(
+            &invalid,
+            Some("loader-old"),
+            "loader-current"
+        ));
+        assert!(!discardable_obsolete_interception(
+            &invalid,
+            Some("loader-current"),
+            "loader-current"
+        ));
+        assert!(!discardable_obsolete_interception(
+            &invalid,
+            None,
+            "loader-current"
+        ));
+        assert!(!discardable_obsolete_interception(
+            &anyhow::anyhow!("transport failed"),
+            Some("loader-old"),
+            "loader-current"
+        ));
+    }
+
+    #[test]
+    fn request_loader_evidence_is_exact_and_consumed_once() {
+        let requested = NetworkRequestId::from("requested".to_owned());
+        let other = NetworkRequestId::from("other".to_owned());
+        let old_loader = LoaderId::from("loader-old".to_owned());
+        let other_loader = LoaderId::from("loader-other".to_owned());
+        let mut ledger = RequestLoaderLedger::default();
+
+        ledger.record(other.clone(), other_loader.clone());
+        ledger.record(requested.clone(), old_loader.clone());
+        assert_eq!(ledger.take(&requested), Some(old_loader));
+        assert_eq!(ledger.take(&requested), None);
+        assert_eq!(ledger.take(&other), Some(other_loader));
+    }
+
+    #[test]
+    fn request_loader_history_is_bounded() {
+        let mut ledger = RequestLoaderLedger::default();
+        for index in 0..=1024 {
+            ledger.record(
+                NetworkRequestId::from(format!("request-{index}")),
+                LoaderId::from(format!("loader-{index}")),
+            );
+        }
+
+        assert_eq!(
+            ledger.take(&NetworkRequestId::from("request-0".to_owned())),
+            None
+        );
+        assert_eq!(
+            ledger.take(&NetworkRequestId::from("request-1024".to_owned())),
+            Some(LoaderId::from("loader-1024".to_owned()))
+        );
+    }
+
+    #[test]
     fn summary_schema_contains_only_privacy_safe_identity_and_counts() {
         let summary = ManagedBrowserSummary {
             chromium_version: "Chromium/152".to_owned(),
@@ -1080,6 +1301,7 @@ mod tests {
             continued: 2,
             replaced: 2,
             failed_closed: 1,
+            canceled: 1,
             blocked_extra_pages: 0,
             unresolved: 0,
             clean_shutdown: true,
@@ -1090,6 +1312,7 @@ mod tests {
             object.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "blocked_extra_pages",
+                "canceled",
                 "chromium_version",
                 "clean_shutdown",
                 "continued",
@@ -1180,6 +1403,21 @@ mod tests {
             ledger.resolved(&request).unwrap_err().to_string(),
             "request request was resolved more than once"
         );
+    }
+
+    #[test]
+    fn canceled_obsolete_pause_is_accounted_without_allowing_or_replacing() {
+        let request = request_id("obsolete");
+        let mut state = ManualPageState::default();
+        state.begin_response(&request).unwrap();
+        state.cancel_obsolete(&request).unwrap();
+
+        assert_eq!(state.ledger.unresolved_count(), 0);
+        assert_eq!(state.counts.intercepted, 1);
+        assert_eq!(state.counts.canceled, 1);
+        assert_eq!(state.counts.continued, 0);
+        assert_eq!(state.counts.replaced, 0);
+        assert_eq!(state.counts.failed_closed, 0);
     }
 
     #[test]
